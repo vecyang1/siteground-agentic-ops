@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "package_name": "@automattic/mcp-wordpress-remote",
+  "package_version": "0.3.5",
+  "runtime_root": "/absolute/path/to/reviewed/runtime",
+  "command": [
+    "/absolute/path/to/node",
+    "/absolute/path/to/reviewed/runtime/node_modules/@automattic/mcp-wordpress-remote/dist/proxy.js"
+  ],
+  "tree_sha256": "sha256-of-the-complete-runtime-tree"
+}

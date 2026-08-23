@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+graphify-out/
+build/
+status.json
+logs/
+.env
+.env.*
+*.pem
+*.key
+id_ed25519*
+node_modules/
+.gitnexus/

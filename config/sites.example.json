@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "sites": {
+    "example-production": {
+      "label": "Example WordPress production",
+      "environment": "production",
+      "adapter": "paramiko_wpcli",
+      "env_file": "/absolute/project/path/.env",
+      "key_file": "/absolute/project/path/assets/auth/id_ed25519",
+      "remote_path": "~/www/example.com/public_html",
+      "credential_pointer": "Project .env: SSH_HOST, SSH_USER, SSH_PORT, SSH_CONFIRMED_PASS",
+      "recovery_pointer": "Project operations runbook or provider backup receipt",
+      "public_url": "https://example.com",
+      "novamira_server": "novamira-example-com"
+    },
+    "novamira-only-production": {
+      "label": "WordPress production with exact Novamira MCP access",
+      "environment": "production",
+      "adapter": "novamira_mcp",
+      "credential_pointer": "novamira-ops mcp_config exact server entry",
+      "recovery_pointer": "Provider backup owner before any future mutation",
+      "public_url": "https://novamira-only.example.com",
+      "novamira_server": "novamira-novamira-only-example-com"
+    }
+  }
+}
