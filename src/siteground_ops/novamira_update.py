@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
-SUPPORTED_CLI_VERSION = "1.0.3"
+SUPPORTED_CLI_VERSION = "1.1.0"
+# Every version review has cleared for this machine, not just the current pin:
+# the installed package is graded against what was reviewed, never against the
+# registry's latest, which would blame a clean local package the moment upstream
+# ships anything newer.
+REVIEWED_CLI_VERSIONS = frozenset({"1.0.0", "1.0.3", SUPPORTED_CLI_VERSION})
 SUPPORTED_SERVER_VERSION = "1.11.1"
 PACKAGE_NAME = "@novamira/cli"
 DEFAULT_REGISTRY = "https://registry.npmjs.org"
@@ -173,7 +178,7 @@ class NovamiraUpdater:
             blockers.append("candidate_registry_integrity_failed")
         if not release.provenance_ok:
             blockers.append("candidate_provenance_missing")
-        if installed.version not in {"1.0.0", release.version}:
+        if installed.version not in REVIEWED_CLI_VERSIONS:
             blockers.append(f"installed_version_requires_review:{installed.version}")
         if not installed.integrity_clean:
             blockers.append("installed_package_integrity_failed")

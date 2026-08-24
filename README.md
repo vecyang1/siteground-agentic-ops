@@ -24,8 +24,8 @@ siteground-ops wp-admin <site-id-or-domain> [--app <id>] [--foreground]
 siteground-ops portal read <account> wp-apps
 siteground-ops cache-purge <site-id> --confirm-target <site-id> --recovery-receipt <receipt>
 siteground-ops novamira-update check
-siteground-ops novamira-update baseline --confirm-version 1.0.3
-siteground-ops novamira-update apply --confirm-version 1.0.3
+siteground-ops novamira-update baseline --confirm-version 1.1.0
+siteground-ops novamira-update apply --confirm-version 1.1.0
 ```
 
 ## WordPress admin sign-in
@@ -56,7 +56,7 @@ reads retry once on a dropped browser bridge, `wp-login` never does, because a
 repeat mints a second credential rather than repeating a query.
 
 The unattended lane is `update-novamira-cli-stable.sh`. It runs a read-only
-check daily at 05:20 local time and auto-applies only the reviewed `1.0.3`
+check daily at 05:20 local time and auto-applies only the reviewed `1.1.0`
 release when all gates pass. A newer or changed release is recorded as a
 refusal until the supported version and its evidence are reviewed in code.
 On a new machine, a missing owner baseline is refused; establish it once with
@@ -111,7 +111,7 @@ does not retry it.
 - Novamira is read-only here. `cache-purge` and every future mutation remain on
   the explicitly qualified SSH/WP-CLI route.
 - Credentials remain in approved project env/1Password owners. Profiles contain pointers only.
-- Novamira `1.0.3` removed read-scoped OAuth and requires full-access authorization. The updater reconciles the local `novamira-ops` guidance, verifies the exact npm tarball bytes with SRI plus npm's official signature/provenance verifier, stages the pinned artifact under a network-denying sandbox, installs it in an owned temporary Bun prefix without saving the temporary path, rewrites a stable exact manifest/lock spec, snapshots package/dependency bytes plus modes, checks offline doctor/profile identity with a scrubbed HOME, refreshes its owner baseline only after successful readback, and restores every owned path (including that baseline) on failure. It never updates the local skill.
+- Novamira `1.0.3` removed read-scoped OAuth and requires full-access authorization; the reviewed pin is now `1.1.0`, which adds an OAuth device grant and an optional `clientGrant` profile field without migrating existing profiles. The updater reconciles the local `novamira-ops` guidance, verifies the exact npm tarball bytes with SRI plus npm's official signature/provenance verifier, stages the pinned artifact under a network-denying sandbox, installs it in an owned temporary Bun prefix without saving the temporary path, rewrites a stable exact manifest/lock spec, snapshots package/dependency bytes plus modes, checks offline doctor/profile identity with a scrubbed HOME, refreshes its owner baseline only after successful readback, and restores every owned path (including that baseline) on failure. It never updates the local skill.
 
 ## Provider boundary
 

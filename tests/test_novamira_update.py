@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from siteground_ops.novamira_update import (
+    SUPPORTED_CLI_VERSION,
     InstalledPackage,
     NovamiraUpdater,
     RegistryRelease,
@@ -19,8 +20,8 @@ class FakeBackend:
 
     def registry_release(self) -> RegistryRelease:
         return RegistryRelease(
-            version="1.0.3",
-            tarball_url="https://registry.npmjs.org/@novamira/cli/-/cli-1.0.3.tgz",
+            version=SUPPORTED_CLI_VERSION,
+            tarball_url=f"https://registry.npmjs.org/@novamira/cli/-/cli-{SUPPORTED_CLI_VERSION}.tgz",
             integrity="sha512-published",
             registry_integrity_ok=True,
             provenance_ok=True,
@@ -71,7 +72,7 @@ def test_check_reports_update_without_entering_mutation_lane(tmp_path: Path) -> 
         "ok": True,
         "mutation_state": "not_applicable",
         "current": "1.0.0",
-        "latest": "1.0.3",
+        "latest": SUPPORTED_CLI_VERSION,
         "update_available": True,
         "auto_apply_ready": True,
         "blockers": [],
@@ -82,7 +83,7 @@ def test_check_reports_update_without_entering_mutation_lane(tmp_path: Path) -> 
 def test_check_is_healthy_when_latest_version_is_already_installed(tmp_path: Path) -> None:
     backend = FakeBackend(tmp_path)
     backend.installed_package = lambda: InstalledPackage(
-        version="1.0.3",
+        version=SUPPORTED_CLI_VERSION,
         package_dir=tmp_path / "node_modules" / "@novamira" / "cli",
         owner_manifest=tmp_path / "package.json",
         owner_lock=tmp_path / "bun.lock",
@@ -99,7 +100,7 @@ def test_check_is_healthy_when_latest_version_is_already_installed(tmp_path: Pat
 
 def test_initialize_baseline_is_explicit_and_readback_verified(tmp_path: Path) -> None:
     backend = MutationBackend(tmp_path)
-    backend.version = "1.0.3"
+    backend.version = SUPPORTED_CLI_VERSION
 
     result = NovamiraUpdater(backend=backend, home=tmp_path).initialize_baseline(
         confirmed=True
@@ -108,11 +109,11 @@ def test_initialize_baseline_is_explicit_and_readback_verified(tmp_path: Path) -
     assert result == {
         "ok": True,
         "mutation_state": "applied",
-        "current": "1.0.3",
-        "latest": "1.0.3",
+        "current": SUPPORTED_CLI_VERSION,
+        "latest": SUPPORTED_CLI_VERSION,
         "baseline_initialized": True,
     }
-    assert backend.baseline_refreshes == ["1.0.3"]
+    assert backend.baseline_refreshes == [SUPPORTED_CLI_VERSION]
 
 
 def test_apply_refuses_when_guidance_or_installed_integrity_is_not_safe(
@@ -153,14 +154,14 @@ def test_apply_requires_explicit_confirmation_even_when_all_gates_are_ready(
 
 
 def test_controlled_command_is_exact_bun_owner_operation() -> None:
-    assert controlled_bun_command("1.0.3") == (
+    assert controlled_bun_command(SUPPORTED_CLI_VERSION) == (
         "bun",
         "add",
         "--exact",
         "--ignore-scripts",
         "--registry",
         "https://registry.npmjs.org",
-        "@novamira/cli@1.0.3",
+        f"@novamira/cli@{SUPPORTED_CLI_VERSION}",
     )
 
 
@@ -171,11 +172,11 @@ def test_apply_verifies_candidate_and_preserves_profiles(tmp_path: Path) -> None
 
     assert result["ok"] is True
     assert result["mutation_state"] == "applied"
-    assert result["current"] == "1.0.3"
+    assert result["current"] == SUPPORTED_CLI_VERSION
     assert result["previous"] == "1.0.0"
     assert result["candidate_verified"] is True
     assert result["profiles_preserved"] is True
-    assert result["bun_command"][-1] == "@novamira/cli@1.0.3"
+    assert result["bun_command"][-1] == f"@novamira/cli@{SUPPORTED_CLI_VERSION}"
     assert backend.mutation_calls == [
         "verify_candidate",
         "profile_inventory",
@@ -184,7 +185,7 @@ def test_apply_verifies_candidate_and_preserves_profiles(tmp_path: Path) -> None
         "offline_doctor",
         "profile_inventory",
     ]
-    assert backend.baseline_refreshes == ["1.0.3"]
+    assert backend.baseline_refreshes == [SUPPORTED_CLI_VERSION]
 
 
 def test_apply_rolls_back_when_post_apply_doctor_fails(tmp_path: Path) -> None:
@@ -233,7 +234,7 @@ class MutationBackend(FakeBackend):
     def apply_bun(self, _release: RegistryRelease, command: tuple[str, ...]) -> None:
         self.mutation_calls.append("apply_bun")
         self.applied_command = command
-        self.version = "1.0.3"
+        self.version = SUPPORTED_CLI_VERSION
 
     def installed_package(self) -> InstalledPackage:
         return InstalledPackage(
@@ -280,8 +281,8 @@ def test_apply_stages_verifies_preserves_profiles_and_applies_exact_owner_comman
         "offline_doctor",
         "profile_inventory",
     ]
-    assert backend.baseline_refreshes == ["1.0.3"]
-    assert backend.applied_command == controlled_bun_command("1.0.3")
+    assert backend.baseline_refreshes == [SUPPORTED_CLI_VERSION]
+    assert backend.applied_command == controlled_bun_command(SUPPORTED_CLI_VERSION)
 
 
 def test_apply_rolls_back_when_post_install_doctor_fails(tmp_path: Path) -> None:
@@ -343,8 +344,8 @@ def test_apply_refuses_if_installed_package_changes_during_preflight(
         nonlocal release_calls
         release_calls += 1
         return RegistryRelease(
-            version="1.0.3" if release_calls == 1 else "9.9.9",
-            tarball_url="https://registry.npmjs.org/@novamira/cli/-/cli-1.0.3.tgz",
+            version=SUPPORTED_CLI_VERSION if release_calls == 1 else "9.9.9",
+            tarball_url=f"https://registry.npmjs.org/@novamira/cli/-/cli-{SUPPORTED_CLI_VERSION}.tgz",
             integrity="sha512-published",
             registry_integrity_ok=True,
             provenance_ok=True,
@@ -414,3 +415,33 @@ class FailingDoctorBackend(MutationBackend):
     def offline_doctor(self) -> dict[str, object]:
         self.mutation_calls.append("offline_doctor")
         return {"status": "fail", "failed_checks": ["runtime.node"]}
+
+
+def test_a_reviewed_installed_package_is_not_blamed_when_upstream_moves(tmp_path: Path) -> None:
+    """Upstream shipping a newer release says nothing about the reviewed one here."""
+    from siteground_ops.novamira_update import SUPPORTED_CLI_VERSION
+
+    class UpstreamMoved(FakeBackend):
+        def registry_release(self) -> RegistryRelease:
+            return RegistryRelease(
+                version="9.9.9",
+                tarball_url="https://registry.npmjs.org/@novamira/cli/-/cli-9.9.9.tgz",
+                integrity="sha512-published",
+                registry_integrity_ok=True,
+                provenance_ok=True,
+            )
+
+        def installed_package(self) -> InstalledPackage:
+            return InstalledPackage(
+                version=SUPPORTED_CLI_VERSION,
+                package_dir=self.home / "node_modules" / "@novamira" / "cli",
+                owner_manifest=self.home / "package.json",
+                owner_lock=self.home / "bun.lock",
+                integrity_clean=True,
+            )
+
+    result = NovamiraUpdater(backend=UpstreamMoved(tmp_path), home=tmp_path).check()
+
+    assert result["auto_apply_ready"] is False
+    assert result["blockers"] == ["candidate_version_requires_review:9.9.9"]
+    assert not any("installed_version_requires_review" in b for b in result["blockers"])

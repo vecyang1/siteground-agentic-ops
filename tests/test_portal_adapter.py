@@ -374,3 +374,68 @@ def test_every_portal_command_gives_the_browser_a_budget_the_wrapper_cannot_cut_
             f"{name} lets the wrapper kill OpenCLI before it can name its own timeout"
         )
     print(f"graded {len(observed)} OpenCLI invocations across {len(portal.PORTAL_PLUGIN_COMMANDS)} commands")
+
+
+# Captured verbatim from a real `opencli --profile <p> siteground websites --format json`
+# run with the Chrome bridge disconnected: exit 69, YAML on stderr, empty stdout.
+# `--format json` does not apply to the failure envelope, which a hand-written
+# fixture would get wrong in exactly the way that hides this bug.
+OPENCLI_BROWSER_CONNECT_STDERR = (
+    'ok: false\n'
+    'error:\n'
+    '  code: BROWSER_CONNECT\n'
+    '  message: Browser profile "profile-alias" is not connected\n'
+    '  help: >-\n'
+    '    Open the matching Chrome profile and make sure the OpenCLI extension is enabled, '
+    'or choose another profile with\n'
+    '    opencli profile use <name>.\n'
+    '  exitCode: 69\n'
+)
+
+
+def failed(command: list[str], *, stderr: str, returncode: int = 69) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(command, returncode, stdout="", stderr=stderr)
+
+
+def test_disconnected_browser_bridge_is_named_not_generalised() -> None:
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return failed(command, stderr=OPENCLI_BROWSER_CONNECT_STDERR)
+
+    with pytest.raises(PortalError) as caught:
+        PortalOpenCliAdapter(account(), run_command=run).read("websites")
+
+    assert caught.value.code == "portal_browser_not_connected"
+
+
+def test_json_failure_envelope_yields_the_same_condition() -> None:
+    payload = json.dumps({"ok": False, "error": {"code": "BROWSER_CONNECT", "message": "not connected"}})
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return failed(command, stderr=payload)
+
+    with pytest.raises(PortalError) as caught:
+        PortalOpenCliAdapter(account(), run_command=run).read("websites")
+
+    assert caught.value.code == "portal_browser_not_connected"
+
+
+def test_unmapped_adapter_failure_claims_no_condition() -> None:
+    """An unseen failure must not borrow a diagnosis from a mapped one."""
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return failed(command, stderr="ok: false\nerror:\n  code: SOMETHING_NEW\n  message: unclear\n")
+
+    with pytest.raises(PortalError) as caught:
+        PortalOpenCliAdapter(account(), run_command=run).read("websites")
+
+    assert caught.value.code is None
+
+
+def test_account_identity_mismatch_is_its_own_condition() -> None:
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return completed(command, [{"domain": "not-ours.example.com", "status": "Active"}])
+
+    with pytest.raises(PortalError) as caught:
+        PortalOpenCliAdapter(account(), run_command=run).read("websites")
+
+    assert caught.value.code == "portal_account_identity_mismatch"

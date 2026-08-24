@@ -12,6 +12,8 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,33 @@ from .novamira_update import (
     RegistryRelease,
     controlled_bun_command,
 )
+
+
+class RegistryUnreachable(RuntimeError):
+    """The npm registry could not be reached, so this run has no verdict.
+
+    A resolver that intermittently drops `registry.npmjs.org` produces exactly
+    the same receipt as a registry that says something alarming, and the daily
+    lane then reports a failure nobody can act on. Not reaching the registry is
+    the absence of an answer, not an answer.
+    """
+
+
+# Transient enough that one more attempt is worth more than a false alarm, and
+# bounded so a real outage still finishes quickly instead of holding the lane.
+REGISTRY_FETCH_ATTEMPTS = 3
+REGISTRY_FETCH_BACKOFF_SECONDS = (2.0, 6.0)
+# One package install plus one signature audit, over a link that is sometimes
+# slow. The old 120s tripped on the link, not on npm.
+NPM_VERIFY_TIMEOUT_SECONDS = 180
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """Retry only a failure to reach the host, never an answer it gave."""
+    if isinstance(exc, urllib.error.HTTPError):
+        # The registry replied. A 404 or a 403 is a verdict; repeating it is noise.
+        return False
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
 
 
 def normalize_cli_json(output: str) -> dict[str, Any]:
@@ -113,10 +142,22 @@ class LocalNovamiraBackend:
             return ssl.create_default_context()
 
     @classmethod
-    def _fetch(cls, url: str) -> bytes:
+    def _fetch(cls, url: str, *, sleep: Callable[[float], None] = time.sleep) -> bytes:
         request = urllib.request.Request(url, headers={"User-Agent": "siteground-ops/0.1"})
-        with urllib.request.urlopen(request, context=cls._ssl_context(), timeout=30) as response:
-            return response.read()
+        last: BaseException | None = None
+        for attempt in range(REGISTRY_FETCH_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(request, context=cls._ssl_context(), timeout=30) as response:
+                    return response.read()
+            except Exception as exc:
+                if not _is_transient_network_error(exc):
+                    raise
+                last = exc
+                if attempt < len(REGISTRY_FETCH_BACKOFF_SECONDS):
+                    sleep(REGISTRY_FETCH_BACKOFF_SECONDS[attempt])
+        raise RegistryUnreachable(
+            f"npm registry unreachable after {REGISTRY_FETCH_ATTEMPTS} attempts: {last}"
+        ) from last
 
     def _metadata(self, version: str | None = None) -> dict[str, Any]:
         payload = json.loads(
@@ -450,6 +491,12 @@ class LocalNovamiraBackend:
             return False
 
     def _verify_npm_signatures(self, version: str, integrity: str, raw: bytes) -> bool:
+        """Return provenance for this exact version, or refuse to answer.
+
+        Every `return False` below is a verdict the npm output supports. A
+        timeout supports no verdict at all, so it is raised rather than folded
+        into the same `False` that means "this release has no provenance".
+        """
         npm = self._resolve_npm()
         if npm is None:
             return False
@@ -465,10 +512,16 @@ class LocalNovamiraBackend:
                 "NPM_CONFIG_UPDATE_NOTIFIER": "false",
             }
             (root / "home").mkdir()
-            install = subprocess.run(
-                [npm, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", str(root), f"{PACKAGE_NAME}@{version}"],
-                cwd=str(root), env=env, text=True, capture_output=True, check=False, timeout=120,
-            )
+            try:
+                install = subprocess.run(
+                    [npm, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", str(root), f"{PACKAGE_NAME}@{version}"],
+                    cwd=str(root), env=env, text=True, capture_output=True, check=False,
+                    timeout=NPM_VERIFY_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RegistryUnreachable(
+                    f"npm install for provenance timed out after {NPM_VERIFY_TIMEOUT_SECONDS}s"
+                ) from exc
             if install.returncode != 0:
                 return False
             try:
@@ -481,10 +534,16 @@ class LocalNovamiraBackend:
                     return False
             except (OSError, KeyError, json.JSONDecodeError, tarfile.TarError):
                 return False
-            audit = subprocess.run(
-                [npm, "audit", "signatures", "--json", "--include-attestations", "--prefix", str(root)],
-                cwd=str(root), env=env, text=True, capture_output=True, check=False, timeout=120,
-            )
+            try:
+                audit = subprocess.run(
+                    [npm, "audit", "signatures", "--json", "--include-attestations", "--prefix", str(root)],
+                    cwd=str(root), env=env, text=True, capture_output=True, check=False,
+                    timeout=NPM_VERIFY_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RegistryUnreachable(
+                    f"npm audit signatures timed out after {NPM_VERIFY_TIMEOUT_SECONDS}s"
+                ) from exc
             try:
                 report = normalize_cli_json(audit.stdout)
             except ValueError:
@@ -609,6 +668,56 @@ class LocalNovamiraBackend:
     def _sbpl_path(path: Path) -> str:
         return str(path.resolve(strict=False)).replace("\\", "\\\\").replace('"', '\\"')
 
+    @staticmethod
+    def _sbpl_literal_path(path: Path) -> str:
+        """Quote a path without resolving it.
+
+        The CLI entry point is a symlink, and the sandbox matches the path that
+        was asked for as well as the one it points at. Allowing only the target
+        denies the exec that names the link.
+        """
+        return str(path).replace("\\", "\\\\").replace('"', '\\"')
+
+    def _home_traversal_paths(self, targets: tuple[Path, ...]) -> list[Path]:
+        """Every directory between HOME and an allowed path, HOME included.
+
+        Node resolves its main module with `realpath`, which lstats each
+        component on the way down. With the home subtree denied outright those
+        lstats fail with EPERM before a single line of the CLI runs, so the
+        traversal needs metadata - and only metadata, never contents.
+        """
+        home = self.paths.home.resolve(strict=False)
+        seen: dict[str, Path] = {}
+        for target in targets:
+            current = target.resolve(strict=False)
+            while current != home and home in current.parents:
+                seen.setdefault(str(current), current)
+                current = current.parent
+        seen.setdefault(str(home), home)
+        return [seen[key] for key in sorted(seen)]
+
+    def _declared_dependency_dirs(self) -> list[Path]:
+        """Hoisted install directories for the package's own declared deps.
+
+        The CLI imports them at startup. Denying them turns the sandboxed read
+        into a module-resolution crash that reads like a broken package.
+        """
+        try:
+            manifest = json.loads(
+                (self.paths.package_dir / "package.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return []
+        dependencies = manifest.get("dependencies")
+        if not isinstance(dependencies, dict):
+            return []
+        root = self.paths.home / "node_modules"
+        return [
+            root / name
+            for name in sorted(dependencies)
+            if self._dependency_name(name)
+        ]
+
     def _sandbox_profile(self, run_root: Path, candidate_home: Path) -> str:
         # Deny network and writes into the real home.  The CLI and Bun are read
         # from their exact owner paths; all writable state is under run_root.
@@ -629,15 +738,28 @@ class LocalNovamiraBackend:
         rules.append(f'(deny file-write* (subpath "{self._sbpl_path(self.paths.home)}"))')
         for path in sensitive:
             rules.append(f'(deny file-read* (subpath "{self._sbpl_path(path)}"))')
+        dependency_dirs = self._declared_dependency_dirs()
+        for path in self._home_traversal_paths(
+            (self.paths.binary, self.paths.bun, self.paths.package_dir, *dependency_dirs)
+        ):
+            rules.append(f'(allow file-read-metadata (literal "{self._sbpl_path(path)}"))')
         rules.extend(
             [
                 f'(allow file-read* (subpath "{self._sbpl_path(run_root)}"))',
                 f'(allow file-write* (subpath "{self._sbpl_path(run_root)}"))',
                 f'(allow file-read* (literal "{self._sbpl_path(self.paths.bun)}"))',
                 f'(allow process-exec (literal "{self._sbpl_path(self.paths.bun)}"))',
+                # Both spellings of the entry point: the link that is exec'd and
+                # the file it resolves to.
+                f'(allow file-read* (literal "{self._sbpl_literal_path(self.paths.binary)}"))',
+                f'(allow process-exec (literal "{self._sbpl_literal_path(self.paths.binary)}"))',
                 f'(allow file-read* (literal "{self._sbpl_path(self.paths.binary)}"))',
+                f'(allow process-exec (literal "{self._sbpl_path(self.paths.binary)}"))',
                 f'(allow file-read* (subpath "{self._sbpl_path(self.paths.package_dir)}"))',
             ]
+        )
+        rules.extend(
+            f'(allow file-read* (subpath "{self._sbpl_path(path)}"))' for path in dependency_dirs
         )
         return "".join(rules)
 
