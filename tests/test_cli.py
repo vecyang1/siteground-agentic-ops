@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from siteground_ops.cli import main
+from siteground_ops.novamira_update import SUPPORTED_CLI_VERSION
 from siteground_ops.config import ConfigError, load_config
 from siteground_ops.receipts import redact, sanitize
 
@@ -549,9 +550,52 @@ def test_novamira_apply_preflight_failure_is_refused(
 
     monkeypatch.setattr("siteground_ops.cli.build_novamira_updater", lambda: FailingUpdater())
     exit_code = main(
-        ["--config", str(tmp_path / "missing.json"), "novamira-update", "apply", "--confirm-version", "1.0.3"]
+        ["--config", str(tmp_path / "missing.json"), "novamira-update", "apply", "--confirm-version", SUPPORTED_CLI_VERSION]
     )
     receipt = read_receipt(capsys)
     assert exit_code == 2
     assert receipt["mutation_state"] == "refused"
     assert receipt["diagnostics"]["code"] == "novamira_preflight_failed"
+
+
+def test_unreachable_registry_is_no_verdict_not_a_failed_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daily lane must tell "could not ask" from "asked and disliked the answer"."""
+    from siteground_ops.cli import EXIT_NO_VERDICT
+    from siteground_ops.novamira_backend import RegistryUnreachable
+
+    class UnreachableUpdater:
+        def check(self) -> dict:
+            raise RegistryUnreachable("npm registry unreachable after 3 attempts")
+
+    monkeypatch.setattr("siteground_ops.cli.build_novamira_updater", lambda: UnreachableUpdater())
+    exit_code = main(["--config", str(tmp_path / "missing.json"), "novamira-update", "check"])
+    receipt = read_receipt(capsys)
+
+    assert exit_code == EXIT_NO_VERDICT
+    assert exit_code != 1, "a no-verdict run must not share an exit code with a real finding"
+    assert receipt["mutation_state"] == "not_applicable"
+    assert receipt["diagnostics"]["code"] == "novamira_registry_unreachable"
+    assert "nothing was changed" in receipt["safe_next_action"]
+
+
+def test_a_mutation_that_cannot_reach_the_registry_still_refuses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No verdict must never read as permission to proceed."""
+    from siteground_ops.novamira_backend import RegistryUnreachable
+
+    class UnreachableUpdater:
+        def apply(self, *, confirmed: bool) -> dict:
+            raise RegistryUnreachable("npm registry unreachable after 3 attempts")
+
+    monkeypatch.setattr("siteground_ops.cli.build_novamira_updater", lambda: UnreachableUpdater())
+    exit_code = main(
+        ["--config", str(tmp_path / "missing.json"), "novamira-update", "apply", "--confirm-version", SUPPORTED_CLI_VERSION]
+    )
+    receipt = read_receipt(capsys)
+
+    assert exit_code != 0
+    assert receipt["ok"] is False
+    assert receipt["mutation_state"] in {"not_applicable", "refused"}

@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- Fix the candidate sandbox, which could never execute the CLI it was built to
+  grade. `profile_inventory` and `offline_doctor` run the entry point under
+  `sandbox-exec`, and the profile allowed `process-exec` on Bun only, while the
+  entry point is a symlink into `node_modules`. Every `apply` would have refused
+  with `profile_inventory_failed`; nothing caught it because the fakes stand in
+  for the sandbox and the version pin meant `apply` had never once run for real.
+  Three rules were missing: exec on the path the CLI is *called* by as well as
+  the one it resolves to, `file-read-metadata` on each directory between HOME
+  and an allowed path (Node realpaths its main module and lstats every
+  component, which EPERMs under a blanket HOME deny), and read access to the
+  package's own declared dependencies. Content denies, the sensitive-path
+  denies, and `(deny network*)` are unchanged.
+- Review and adopt `@novamira/cli` 1.1.0 (published 2026-08-11); the reviewed
+  pin moves from 1.0.3. Evidence: npm SRI and signature/provenance both verify;
+  no new dependencies (`commander ^14` only), no install scripts, `node >=22`
+  unchanged; the only network host in `dist/` is still the npm registry; the
+  required Novamira server version is unchanged at 1.11.1. It adds an OAuth
+  device grant, and profiles gain an *optional* `clientGrant` field that older
+  profiles are explicitly documented to omit -- so adopting it migrates nothing.
+  The one-way note: a profile written by 1.1.0 carries a key 1.0.3's validator
+  rejects, so a downgrade after a profile write would need the profile rewritten.
+- Grade the installed package against the versions review has cleared, not
+  against the registry's latest. Once upstream shipped 1.1.0 the check reported
+  `installed_version_requires_review:1.0.3` about a package that had been
+  reviewed and verified -- a blocker that named the wrong thing and could only
+  appear when a second, real blocker was already firing.
+- Treat an unreachable npm registry as *no verdict*, not as a failed check. Five
+  of fifteen daily runs had failed on the resolver rather than on the package
+  (`urlopen error [Errno 8]`, and a 120s npm timeout), and the lane reported
+  both as `check failed`. The registry read now retries a transport failure
+  three times with backoff -- never an HTTP status, which is an answer -- and an
+  exhausted retry exits `75` (EX_TEMPFAIL) with `novamira_registry_unreachable`.
+  The lane exits 0 on it and records `no_verdict_streak`, so a dropped lookup
+  stays quiet while a real outage becomes a number that climbs.
+- `_verify_npm_signatures` raises on a timeout instead of returning `False`. The
+  same `False` means "this release has no provenance", and a slow link is not
+  evidence about a signature.
+- Carry OpenCLI's own failure condition into the portal receipt. Every portal
+  failure reported `portal_read_failed` with a remedy naming the SiteGround
+  login, while the live failure was a disconnected browser bridge -- a correct
+  remedy sitting one line below a wrong diagnosis. `PortalError` now carries the
+  condition, and only conditions with an observed adapter sample are mapped.
+- Close the last gap between the portal inventory and the local profiles: the
+  one remaining unprofiled site is now registered as `portal_only`, so its
+  Site Tools links and `wp-admin` work while it has no read transport. It has
+  none because it answers 404 on `/wp-json/mcp/novamira` and sits on a different
+  hosting account from the one SSH-enabled profile -- measured by listing that
+  account's document roots, not assumed from the shared-hosting layout, which
+  turns out to expose exactly one site plus its staging copy per account.
+  Giving it a read transport needs the Novamira MCP plugin installed or its own
+  SSH credential; both are provider-side writes and neither is this tool's call.
+- `belovedpals-siteground` moves from `portal_only` to `novamira_mcp`. Its MCP
+  server and credential already existed and the site answers
+  `/wp-json/mcp/novamira`; the profile was simply stale, so the site had been
+  listed as unreadable while `doctor` and `inventory` both work against it.
+
 - Relicense from MIT to AGPL-3.0-or-later. The realistic way an ops tool gets
   taken proprietary is a hosted dashboard running a modified copy, which
   distributes nothing and so never triggers plain GPL; AGPL section 13 covers

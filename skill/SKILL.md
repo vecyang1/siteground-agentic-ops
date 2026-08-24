@@ -68,6 +68,13 @@ Failure states are distinguished on purpose:
 Reads retry once on a dropped browser bridge. `wp-login` never retries, because
 a repeat mints a second credential rather than repeating a query.
 
+A failed portal read names the condition OpenCLI reported, not a guess:
+`portal_browser_not_connected` (Chrome is closed or the extension is off -- the
+most common one, and it is *not* a login problem), `portal_read_timeout`,
+`portal_adapter_unavailable`, `portal_account_identity_mismatch`, or
+`portal_read_failed` when the adapter reported something not yet observed.
+Act on the code, not on the prose.
+
 If a login that used to work starts failing with `attach failed: Cannot access a
 chrome-extension:// URL of different extension`, or hangs until a timer fires,
 check for a second agent session or terminal on the browser bridge before
@@ -163,16 +170,23 @@ Novamira CLI 1.0.2+ removed `--access read` and grants full access on login. Do 
 
 ```bash
 siteground-ops novamira-update check
-siteground-ops novamira-update baseline --confirm-version 1.0.3
-siteground-ops novamira-update apply --confirm-version 1.0.3
+siteground-ops novamira-update baseline --confirm-version 1.1.0
+siteground-ops novamira-update apply --confirm-version 1.1.0
 ```
 
 The updater refuses dirty package bytes, unknown package topology, missing npm signature/provenance verification, stale local guidance, or failed staged/offline checks. It installs the exact verified tarball bytes in an owned temporary Bun prefix with `--no-save`, commits a stable exact package version to the owner manifest/lock, runs candidate and post-apply checks with a scrubbed temporary HOME and network-denying sandbox, refreshes its owner baseline only after successful readback, serializes mutation with a process lock, and restores the exact package/dependency trees, modes, owner files, and baseline on failure. It preserves the local `novamira-ops` skill; profile inventory is read back before acceptance.
 
 The LaunchAgent lane (`update-novamira-cli-stable.sh`) is reviewed-release-only:
-it may auto-apply only the explicitly supported `1.0.3` candidate and otherwise
+it may auto-apply only the explicitly supported `1.1.0` candidate and otherwise
 records a refusal. Install/inspect/remove it with `install.sh`,
 `check-status.sh`, and `uninstall.sh`.
+
+Exit `75` (EX_TEMPFAIL) from `novamira-update` means **no verdict**: the npm
+registry was unreachable after three backed-off attempts, so nothing was
+checked and nothing was changed. It is not a finding. The lane exits 0 on it and
+increments `no_verdict_streak` in `status.json` -- read that number rather than
+the last line of the log, because a single dropped DNS lookup and a week-long
+outage produce the same single quiet run.
 
 ## Credentials and privacy
 

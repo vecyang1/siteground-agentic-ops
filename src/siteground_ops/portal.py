@@ -17,7 +17,17 @@ from .runner import RunnerError
 
 
 class PortalError(RuntimeError):
-    pass
+    """A portal read or write refused, with the condition it refused on.
+
+    OpenCLI already distinguishes a disconnected browser bridge from an expired
+    session or an ambiguous id. Collapsing those into one status hands the
+    operator a remedy addressed to a fault that did not occur, so the condition
+    travels with the error and reaches the receipt.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class PortalUnknownOutcomeError(PortalError):
@@ -344,6 +354,36 @@ def _is_opencli_timeout(result: subprocess.CompletedProcess[str]) -> bool:
         if _OPENCLI_TIMEOUT_TEXT.search(text):
             return True
     return False
+
+
+# Only conditions with an observed adapter sample are mapped. Anything else
+# stays the generic code rather than claiming a cause nobody has seen.
+OPENCLI_FAILURE_CODES = {
+    "BROWSER_CONNECT": "portal_browser_not_connected",
+    "TIMEOUT": "portal_read_timeout",
+}
+
+
+def _opencli_error_code(result: subprocess.CompletedProcess[str]) -> str | None:
+    """Return OpenCLI's own error code, from either envelope format."""
+    for stream in (result.stderr, result.stdout):
+        text = (stream or "").strip()
+        if text.startswith("{"):
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict) and isinstance(error.get("code"), str):
+                    return error["code"].strip().upper()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("code:"):
+                value = stripped.split("code:", 1)[1].strip()
+                if value.isidentifier():
+                    return value.upper()
+    return None
 
 
 def _stderr_reason(result: subprocess.CompletedProcess[str], command: str) -> str:
@@ -717,9 +757,13 @@ class PortalOpenCliAdapter:
                 raise PortalUnknownOutcomeError(
                     "OpenCLI portal write timed out; read state back before any retry."
                 ) from exc
-            raise PortalError("OpenCLI portal read did not complete.") from exc
+            raise PortalError(
+                "OpenCLI portal read did not complete.", code="portal_read_timeout"
+            ) from exc
         except (OSError, RunnerError) as exc:
-            raise PortalError("OpenCLI portal read did not complete.") from exc
+            raise PortalError(
+                "OpenCLI portal read did not complete.", code="portal_adapter_unavailable"
+            ) from exc
         if result.returncode != 0:
             reason = _stderr_reason(result, command)
             if unknown_on_timeout and _is_opencli_timeout(result):
@@ -727,7 +771,7 @@ class PortalOpenCliAdapter:
                     f"{reason}. The browser may have completed the request before the "
                     "abort, so the outcome is unknown; read state back before any retry."
                 )
-            raise PortalError(reason)
+            raise PortalError(reason, code=OPENCLI_FAILURE_CODES.get(_opencli_error_code(result)))
         try:
             payload: Any = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -746,7 +790,10 @@ class PortalOpenCliAdapter:
         }
         missing = [domain for domain in self.account.expected_domains if domain not in observed]
         if missing:
-            raise PortalError("SiteGround portal account identity did not match configured sentinels.")
+            raise PortalError(
+                "SiteGround portal account identity did not match configured sentinels.",
+                code="portal_account_identity_mismatch",
+            )
 
     def read(self, section: str, *, provider_plan_id: str | None = None) -> dict[str, Any]:
         definition = PORTAL_READS.get(section)

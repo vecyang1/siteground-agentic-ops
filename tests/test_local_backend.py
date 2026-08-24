@@ -426,3 +426,146 @@ def test_npm_resolution_uses_absolute_configured_path(tmp_path: Path, monkeypatc
     backend = LocalNovamiraBackend(paths=NovamiraPaths.from_home(tmp_path))
 
     assert backend._resolve_npm() == str(npm)
+
+
+def test_registry_fetch_retries_a_dropped_resolver_then_succeeds(monkeypatch) -> None:
+    """The observed failure was DNS, not the registry. One retry answers it."""
+    import urllib.error
+    import urllib.request
+
+    from siteground_ops.novamira_backend import REGISTRY_FETCH_ATTEMPTS
+
+    attempts: list[int] = []
+    slept: list[float] = []
+
+    class _Response:
+        def read(self) -> bytes:
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    def urlopen(_request, **_kwargs):
+        attempts.append(1)
+        if len(attempts) < REGISTRY_FETCH_ATTEMPTS:
+            raise urllib.error.URLError("[Errno 8] nodename nor servname provided, or not known")
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    payload = LocalNovamiraBackend._fetch("https://registry.example.com/pkg", sleep=slept.append)
+
+    assert payload == b"{}"
+    assert len(attempts) == REGISTRY_FETCH_ATTEMPTS
+    assert slept, "a retry that does not back off is a tight loop"
+
+
+def test_registry_unreachable_is_raised_not_reported_as_a_bad_answer(monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from siteground_ops.novamira_backend import REGISTRY_FETCH_ATTEMPTS, RegistryUnreachable
+
+    attempts: list[int] = []
+
+    def urlopen(_request, **_kwargs):
+        attempts.append(1)
+        raise urllib.error.URLError("[Errno 8] nodename nor servname provided, or not known")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    try:
+        LocalNovamiraBackend._fetch("https://registry.example.com/pkg", sleep=lambda _s: None)
+    except RegistryUnreachable:
+        pass
+    else:  # pragma: no cover - the assertion below reports the real failure
+        raise AssertionError("an unreachable registry must not look like a verdict")
+    assert len(attempts) == REGISTRY_FETCH_ATTEMPTS
+
+
+def test_an_http_answer_is_a_verdict_and_is_never_retried(monkeypatch) -> None:
+    """A 404 is the registry speaking. Repeating it is noise, not resilience."""
+    import urllib.error
+    import urllib.request
+
+    attempts: list[int] = []
+
+    def urlopen(_request, **_kwargs):
+        attempts.append(1)
+        raise urllib.error.HTTPError("https://registry.example.com/pkg", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    try:
+        LocalNovamiraBackend._fetch("https://registry.example.com/pkg", sleep=lambda _s: None)
+    except urllib.error.HTTPError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("an HTTP status must propagate unchanged")
+    assert len(attempts) == 1
+
+
+def _sandboxed_backend(tmp_path: Path) -> tuple[LocalNovamiraBackend, NovamiraPaths]:
+    """A realistic install: the entry point is a symlink, as npm and Bun write it."""
+    paths = NovamiraPaths.from_home(tmp_path)
+    paths.package_dir.mkdir(parents=True)
+    (paths.package_dir / "package.json").write_text(
+        json.dumps({"name": "@novamira/cli", "version": "1.1.0", "dependencies": {"commander": "^14.0.0"}}),
+        encoding="utf-8",
+    )
+    (paths.package_dir / "dist").mkdir()
+    (paths.package_dir / "dist" / "index.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    (tmp_path / "node_modules" / "commander").mkdir(parents=True)
+    paths.binary.parent.mkdir(parents=True)
+    paths.binary.symlink_to(paths.package_dir / "dist" / "index.js")
+    paths.bun.write_text("", encoding="utf-8")
+    return LocalNovamiraBackend(paths=paths), paths
+
+
+def test_sandbox_allows_executing_the_entry_point_by_the_name_it_is_called_by(tmp_path: Path) -> None:
+    """The CLI is exec'd through its symlink; allowing only the target denies it."""
+    backend, paths = _sandboxed_backend(tmp_path)
+
+    profile = backend._sandbox_profile(tmp_path / "run", tmp_path / "run" / ".candidate-home")
+
+    assert f'(allow process-exec (literal "{paths.binary}"))' in profile
+    resolved = paths.binary.resolve(strict=False)
+    assert f'(allow process-exec (literal "{resolved}"))' in profile
+    assert resolved != paths.binary, "fixture no longer models a symlinked entry point"
+
+
+def test_sandbox_allows_metadata_traversal_from_home_without_exposing_contents(tmp_path: Path) -> None:
+    """Node realpaths its main module, lstat-ing every component below HOME."""
+    backend, paths = _sandboxed_backend(tmp_path)
+
+    profile = backend._sandbox_profile(tmp_path / "run", tmp_path / "run" / ".candidate-home")
+
+    assert f'(allow file-read-metadata (literal "{paths.home}"))' in profile
+    assert f'(allow file-read-metadata (literal "{paths.home / "node_modules"}"))' in profile
+    # Metadata only: the blanket content deny on HOME must still stand.
+    assert f'(deny file-read* (subpath "{paths.home}"))' in profile
+    assert f'(allow file-read* (subpath "{paths.home}"))' not in profile
+    assert "(deny network*)" in profile
+
+
+def test_sandbox_allows_the_packages_declared_dependencies(tmp_path: Path) -> None:
+    """Denying them turns a sandboxed read into a module-resolution crash."""
+    backend, paths = _sandboxed_backend(tmp_path)
+
+    profile = backend._sandbox_profile(tmp_path / "run", tmp_path / "run" / ".candidate-home")
+
+    assert f'(allow file-read* (subpath "{paths.home / "node_modules" / "commander"}"))' in profile
+    # An undeclared sibling stays denied.
+    assert f'(allow file-read* (subpath "{paths.home / "node_modules" / "left-pad"}"))' not in profile
+
+
+def test_sandbox_ignores_dependency_names_that_could_escape_node_modules(tmp_path: Path) -> None:
+    backend, paths = _sandboxed_backend(tmp_path)
+    (paths.package_dir / "package.json").write_text(
+        json.dumps({"name": "@novamira/cli", "version": "1.1.0", "dependencies": {"../../.ssh": "1"}}),
+        encoding="utf-8",
+    )
+
+    profile = backend._sandbox_profile(tmp_path / "run", tmp_path / "run" / ".candidate-home")
+
+    assert ".ssh" not in profile.replace(f'(deny file-read* (subpath "{paths.home / ".ssh"}"))', "")

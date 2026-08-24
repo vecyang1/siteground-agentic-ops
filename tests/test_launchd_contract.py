@@ -31,8 +31,8 @@ def test_updater_scripts_are_syntax_valid() -> None:
 
 def test_unattended_lane_is_pinned_to_reviewed_release() -> None:
     script = (ROOT / "update-novamira-cli-stable.sh").read_text(encoding="utf-8")
-    assert 'evidence.get("latest") == "1.0.3"' in script
-    assert "--confirm-version 1.0.3" in script
+    assert 'evidence.get("latest") == "1.1.0"' in script
+    assert "--confirm-version 1.1.0" in script
     assert "no approved update eligible; no mutation attempted" in script
 
 
@@ -47,3 +47,25 @@ def test_status_script_emits_one_combined_json_receipt() -> None:
     script = (ROOT / "check-status.sh").read_text(encoding="utf-8")
     assert '"status": stored' in script
     assert '"live_check": live' in script
+
+
+def test_lane_treats_an_unreachable_registry_as_no_verdict() -> None:
+    """An alarm that fires on the network stops being read before it fires on the package."""
+    script = (ROOT / "update-novamira-cli-stable.sh").read_text(encoding="utf-8")
+    assert '"$check_rc" -eq 75' in script
+    assert "no verdict: registry unreachable" in script
+    assert "no_verdict_streak" in script
+    # The no-verdict branch must exit before the mutation gate, never through it.
+    assert script.index('"$check_rc" -eq 75') < script.index('"$check_rc" -ne 0')
+    assert script.index('"$check_rc" -eq 75') < script.index("--confirm-version 1.1.0")
+
+
+def test_lane_exit_code_for_no_verdict_matches_the_cli() -> None:
+    """The shell's 75 and the CLI's EXIT_NO_VERDICT are one contract in two files."""
+    import sys
+
+    sys.path.insert(0, str(ROOT / "src"))
+    from siteground_ops.cli import EXIT_NO_VERDICT
+
+    script = (ROOT / "update-novamira-cli-stable.sh").read_text(encoding="utf-8")
+    assert f'"$check_rc" -eq {EXIT_NO_VERDICT}' in script

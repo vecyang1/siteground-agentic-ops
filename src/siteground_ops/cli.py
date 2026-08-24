@@ -9,8 +9,12 @@ from pathlib import Path
 from typing import Sequence
 from urllib.parse import urlsplit
 
-from .config import ConfigError, OpsConfig, load_config
-from .novamira_backend import LocalNovamiraBackend, NovamiraPaths
+from .config import ConfigError, OpsConfig, PortalAccountConfig, load_config
+
+# EX_TEMPFAIL. Distinct from 1 so an automated lane can tell "we could not ask"
+# from "we asked and did not like the answer".
+EXIT_NO_VERDICT = 75
+from .novamira_backend import LocalNovamiraBackend, NovamiraPaths, RegistryUnreachable
 from .novamira_update import NovamiraUpdater, SUPPORTED_CLI_VERSION
 from .portal import (
     PORTAL_READS,
@@ -138,6 +142,24 @@ def handle_novamira_update(args: argparse.Namespace, request_id: str) -> int:
             result = updater.initialize_baseline(confirmed=True)
         else:
             result = updater.apply(confirmed=True)
+    except RegistryUnreachable as exc:
+        # Not reaching the registry is the absence of a verdict. Reporting it as
+        # a failed check makes the daily lane cry wolf on a dropped DNS lookup.
+        emit(
+            receipt(
+                ok=False,
+                operation="novamira-update",
+                target=None,
+                mutation_state="not_applicable",
+                request_id=request_id,
+                safe_next_action=(
+                    "No verdict: the npm registry was unreachable. Confirm network and DNS, "
+                    "then re-run; nothing was changed."
+                ),
+                diagnostics={"code": "novamira_registry_unreachable", "message": str(exc)},
+            )
+        )
+        return EXIT_NO_VERDICT
     except Exception as exc:
         read_only = args.update_action == "check"
         emit(
@@ -169,6 +191,46 @@ def handle_novamira_update(args: argparse.Namespace, request_id: str) -> int:
     if result.get("ok") is True:
         return 0
     return 2 if result.get("mutation_state") == "refused" else 3
+
+
+# Each remedy answers only the condition above it. A read that failed because
+# Chrome is closed is not fixed by signing in again, and saying so sends the
+# operator to the wrong place while the real fix sits one line away.
+PORTAL_FAILURE_REMEDIES = {
+    "portal_browser_not_connected": (
+        "Open Chrome on profile {profile} with the OpenCLI extension enabled, confirm "
+        "`opencli profile list` shows it connected, then re-run. SSH and Novamira reads "
+        "are unaffected."
+    ),
+    "portal_read_timeout": (
+        "The portal read exceeded its budget. Confirm the browser bridge is idle "
+        "(`ps aux | grep -c '[o]pencli --profile'` returns 0) and re-run; portal reads "
+        "are idempotent."
+    ),
+    "portal_adapter_unavailable": (
+        "The OpenCLI adapter at {opencli_path} could not be started. Confirm the binary "
+        "is installed and executable, then re-run."
+    ),
+    "portal_account_identity_mismatch": (
+        "The signed-in SiteGround account does not serve this profile's expected_domains. "
+        "Confirm Chrome profile {profile} is signed into the intended account."
+    ),
+    "portal_read_failed": (
+        "Run `siteground-ops portal doctor {account}` to see which leg refused; "
+        "SSH and Novamira reads remain independent."
+    ),
+}
+
+
+def _portal_failure(exc: Exception, account: PortalAccountConfig) -> tuple[str, str]:
+    """Name the condition the adapter reported, not a plausible one."""
+    code = getattr(exc, "code", None) or "portal_read_failed"
+    template = PORTAL_FAILURE_REMEDIES.get(code, PORTAL_FAILURE_REMEDIES["portal_read_failed"])
+    return code, template.format(
+        account=account.account_id,
+        profile=account.opencli_profile,
+        opencli_path=account.opencli_path,
+    )
 
 
 def handle_portal(args: argparse.Namespace, config: OpsConfig, request_id: str) -> int:
@@ -240,7 +302,8 @@ def handle_portal(args: argparse.Namespace, config: OpsConfig, request_id: str) 
     provider_plan_id = None if args.portal_action == "doctor" else args.plan_id
     try:
         evidence = build_portal_adapter(account).read(section, provider_plan_id=provider_plan_id)
-    except Exception:
+    except Exception as exc:
+        code, remedy = _portal_failure(exc, account)
         emit(
             receipt(
                 ok=False,
@@ -248,11 +311,8 @@ def handle_portal(args: argparse.Namespace, config: OpsConfig, request_id: str) 
                 target=account.account_id,
                 mutation_state="not_applicable",
                 request_id=request_id,
-                safe_next_action=(
-                    "Confirm OpenCLI doctor is green and the configured Chrome profile is logged into SiteGround; "
-                    "SSH/Novamira reads remain independent."
-                ),
-                diagnostics={"code": "portal_read_failed"},
+                safe_next_action=remedy,
+                diagnostics={"code": code},
             )
         )
         return 1
