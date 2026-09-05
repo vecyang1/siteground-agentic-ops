@@ -762,3 +762,103 @@ def test_cache_purge_with_novamira_transport_purges_via_novamira(
     assert receipt["evidence"]["transport"] == "novamira"
     assert receipt["evidence"]["command"].startswith("novamira")
 
+
+def test_cache_purge_with_novamira_transport_fails_when_purge_raises(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "label": "Novamira Site",
+            "environment": "staging",
+            "adapter": "novamira_mcp",
+            "credential_pointer": "novamira-ops exact MCP server",
+            "recovery_pointer": "Provider backup owner",
+            "public_url": "https://example-shop.com",
+            "novamira_server": "novamira-example",
+        },
+    )
+
+    class FailingNovamiraRunner:
+        def purge_cache(self, _request_id: str) -> dict:
+            from siteground_ops.runner import RunnerError
+            raise RunnerError("SiteGround Speed Optimizer cache purge method unavailable or purge failed.")
+
+    monkeypatch.setattr("siteground_ops.cli.build_novamira_runner", lambda _site: FailingNovamiraRunner())
+
+    exit_code = main(
+        [
+            "--config",
+            str(path),
+            "cache-purge",
+            "prod",
+            "--transport",
+            "novamira",
+            "--confirm-target",
+            "prod",
+            "--recovery-receipt",
+            "test-recovery-123",
+        ]
+    )
+    receipt = read_receipt(capsys)
+
+    assert exit_code == 3
+    assert receipt["ok"] is False
+    assert receipt["operation"] == "cache-purge"
+    assert receipt["mutation_state"] == "unknown"
+    assert receipt["diagnostics"]["code"] == "mutation_failed"
+
+
+def test_novamira_purge_cache_raises_when_method_none_or_not_purged(tmp_path: Path) -> None:
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.runner import NovamiraMcpRunner, RunnerError
+
+    site = SiteConfig(
+        site_id="prod",
+        label="Test Site",
+        environment="staging",
+        adapter="novamira_mcp",
+        credential_pointer="test",
+        recovery_pointer="test",
+        public_url="https://example.com",
+        novamira_server="novamira-test",
+    )
+    runner = NovamiraMcpRunner(site)
+
+    runner._execute_php = lambda _code: {"home_url": "https://example.com", "purged": False, "method": "none"}  # type: ignore[method-assign]
+    with pytest.raises(RunnerError, match="cache purge method unavailable or purge failed"):
+        runner.purge_cache("req-1")
+
+    runner._execute_php = lambda _code: {"home_url": "https://example.com", "purged": False, "method": "sg_cachepress_purge_everything"}  # type: ignore[method-assign]
+    with pytest.raises(RunnerError, match="cache purge method unavailable or purge failed"):
+        runner.purge_cache("req-2")
+
+
+def test_probe_public_cache_headers_captures_http_error_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+    from http.client import HTTPMessage
+    from siteground_ops.runner import probe_public_cache_headers
+
+    headers = HTTPMessage()
+    headers.add_header("server", "nginx")
+    headers.add_header("x-cache-enabled", "False")
+    http_error = urllib.error.HTTPError(
+        url="https://example.com/",
+        code=403,
+        msg="Forbidden",
+        hdrs=headers,
+        fp=None,  # type: ignore[arg-type]
+    )
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(http_error),
+    )
+
+    probe = probe_public_cache_headers("https://example.com")
+    assert probe["ok"] is False
+    assert probe["http_status"] == 403
+    assert probe["server"] == "nginx"
+    assert probe["x_cache_enabled"] == "False"
+
+

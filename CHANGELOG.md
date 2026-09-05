@@ -5,6 +5,9 @@
 - Add `onboard` and `cache-status` subcommands, plus Novamira transport support
   for `cache-purge`. Enables full agentic diagnostics and readiness verification
   for newly provisioned SiteGround sites without requiring immediate SSH access.
+  Fix `CACHE_PURGE_PHP` void return handling for `sg_cachepress_purge_everything()`,
+  enforce fail-closed validation on purge outcomes, capture HTTP error headers
+  in `probe_public_cache_headers()`, and synchronize `SKILL.md` command documentation.
 
 - Stop the oversized-bridge-stream test from racing a wall clock. It pinned
   `NOVAMIRA_TIMEOUT_SECONDS` to 0.5s while the happy path measures 0.26-0.35s,

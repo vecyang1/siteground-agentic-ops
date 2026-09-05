@@ -13,6 +13,8 @@ Use the local `siteground-ops` CLI as the thin control plane for shared-hosted W
 siteground-ops sites
 siteground-ops doctor <exact-site-id> [--transport auto|ssh|novamira]
 siteground-ops inventory <exact-site-id> [--transport auto|ssh|novamira]
+siteground-ops cache-status <exact-site-id> [--transport auto|ssh|novamira]
+siteground-ops onboard <exact-site-id> [--transport auto|ssh|novamira]
 ```
 
 Use the exact target returned by `sites`. `ready` reports the primary adapter;
@@ -159,11 +161,8 @@ siteground-ops cache-purge <site-id> \
 The site profile owns the environment; each CLI invocation generates the
 request UUID. `--recovery-receipt` is a non-secret operator-supplied reference,
 so verify that it points to an existing provider backup or project recovery
-record before running the command. `applied` requires a successful `wp sg
-purge`, matching WordPress `home_url` before and after, and a public GET that
-returns HTTP 2xx/3xx without changing origin. A dropped connection after send
-is `unknown`; independently read state before any retry.
-Novamira is not a mutation fallback: `cache-purge` remains SSH/WP-CLI-only.
+record before running the command. `applied` requires a successful `wp sg purge` (via SSH) or `sg_cachepress_purge_everything()` (via Novamira), matching WordPress `home_url` before and after, and a public GET that returns HTTP 2xx/3xx without changing origin. A dropped connection after send is `unknown`; independently read state before any retry.
+Novamira cache purge is supported explicitly via `--transport novamira`; by default (`--transport auto` or `ssh`), `cache-purge` requires SSH/WP-CLI to ensure fail-closed mutation safety.
 
 ## Novamira update contract
 

@@ -904,6 +904,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         runner = build_runner(site)
+        resolved_transport = "ssh"
     elif transport == "novamira":
         if not site.novamira_server:
             emit(
@@ -933,6 +934,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 2
+        resolved_transport = "novamira"
     else:
         emit(
             receipt(
@@ -965,7 +967,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         evidence = runner.purge_cache(request_id)
-        evidence["transport"] = transport
+        evidence["transport"] = resolved_transport
     except TimeoutError as exc:
         emit(
             receipt(
