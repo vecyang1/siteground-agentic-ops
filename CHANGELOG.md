@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `onboard` and `cache-status` subcommands, plus Novamira transport support
+  for `cache-purge`. Enables full agentic diagnostics and readiness verification
+  for newly provisioned SiteGround sites without requiring immediate SSH access.
+
 - Stop the oversized-bridge-stream test from racing a wall clock. It pinned
   `NOVAMIRA_TIMEOUT_SECONDS` to 0.5s while the happy path measures 0.26-0.35s,
   so the byte guard and the deadline were in a 1.5x race and the deadline

@@ -599,3 +599,166 @@ def test_a_mutation_that_cannot_reach_the_registry_still_refuses(
     assert exit_code != 0
     assert receipt["ok"] is False
     assert receipt["mutation_state"] in {"not_applicable", "refused"}
+
+
+def test_cache_status_reports_edge_and_app_diagnostics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_config(tmp_path)
+    make_ssh_locally_ready(tmp_path)
+
+    class FakeRunner:
+        def cache_status(self) -> dict:
+            return {
+                "home_url": "https://example.com",
+                "optimizer_active": True,
+                "enable_cache": True,
+                "autoflush_cache": True,
+                "file_caching": True,
+                "dynamic_cache": True,
+            }
+
+    monkeypatch.setattr("siteground_ops.cli.build_read_runner", lambda _site, _transport: ("ssh", FakeRunner()))
+    monkeypatch.setattr(
+        "siteground_ops.cli.probe_public_cache_headers",
+        lambda _url: {
+            "ok": True,
+            "http_status": 200,
+            "server": "nginx",
+            "x_cache_enabled": "True",
+            "sg_f_cache": "HIT",
+            "cache_control": "max-age=600",
+            "x_proxy_cache": "HIT",
+            "x_proxy_cache_info": "DT:1",
+        },
+    )
+
+    exit_code = main(["--config", str(path), "cache-status", "prod"])
+    receipt = read_receipt(capsys)
+
+    assert exit_code == 0
+    assert receipt["ok"] is True
+    assert receipt["operation"] == "cache-status"
+    assert receipt["evidence"]["edge_cache_active"] is True
+    assert receipt["evidence"]["edge_headers"]["x_cache_enabled"] == "True"
+    assert receipt["evidence"]["wordpress_app_status"]["optimizer_active"] is True
+
+
+def test_onboard_generates_comprehensive_readiness_checklist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "label": "Staging Site",
+            "environment": "staging",
+            "adapter": "novamira_mcp",
+            "credential_pointer": "novamira-ops exact MCP server",
+            "recovery_pointer": "Provider backup owner",
+            "public_url": "https://example-shop.com",
+            "novamira_server": "novamira-example",
+            "portal_site_id": "EXAMPLESITEID999",
+        },
+    )
+
+    class FakeRunner:
+        def doctor(self) -> dict:
+            return {
+                "home_url": "https://example-shop.com",
+                "wordpress_version": "7.1",
+                "siteground_optimizer_active": True,
+            }
+
+        def inventory(self) -> dict:
+            return {
+                "plugins": [
+                    {"id": "surecart", "version": "4.7.2"},
+                    {"id": "simple-cloudflare-turnstile", "version": "1.42.1"},
+                    {"id": "fluentform", "version": "6.2.13"},
+                    {"id": "sg-cachepress", "version": "7.8.2"},
+                ]
+            }
+
+    monkeypatch.setattr("siteground_ops.cli.build_read_runner", lambda _site, _transport: ("novamira", FakeRunner()))
+    monkeypatch.setattr(
+        "siteground_ops.cli.probe_public_cache_headers",
+        lambda _url: {
+            "ok": True,
+            "http_status": 200,
+            "server": "nginx",
+            "x_cache_enabled": "True",
+            "sg_f_cache": "HIT",
+            "cache_control": "public",
+            "x_proxy_cache": "HIT",
+            "x_proxy_cache_info": "DT:1",
+        },
+    )
+
+    exit_code = main(["--config", str(path), "onboard", "prod"])
+    receipt = read_receipt(capsys)
+
+    assert exit_code == 0
+    assert receipt["ok"] is True
+    assert receipt["operation"] == "onboard"
+    assert receipt["evidence"]["checklist"]["surecart_installed"] is True
+    assert receipt["evidence"]["checklist"]["turnstile_installed"] is True
+    assert receipt["evidence"]["checklist"]["fluent_forms_installed"] is True
+    assert receipt["evidence"]["checklist"]["speed_optimizer_active"] is True
+    assert receipt["evidence"]["links"]["ssh"].startswith("https://tools.siteground.com/ssh")
+    assert receipt["evidence"]["links"]["cache"].startswith("https://tools.siteground.com/cacher")
+
+
+def test_cache_purge_with_novamira_transport_purges_via_novamira(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "label": "Novamira Site",
+            "environment": "staging",
+            "adapter": "novamira_mcp",
+            "credential_pointer": "novamira-ops exact MCP server",
+            "recovery_pointer": "Provider backup owner",
+            "public_url": "https://example-shop.com",
+            "novamira_server": "novamira-example",
+        },
+    )
+
+    class FakeNovamiraRunner:
+        def purge_cache(self, request_id: str) -> dict:
+            return {
+                "command": "novamira sg_cachepress_purge_everything()",
+                "command_output": "purged=True",
+                "request_id": request_id,
+                "readback": {
+                    "home_url": "https://example-shop.com",
+                    "http_status": 200,
+                    "x_proxy_cache": "HIT",
+                },
+            }
+
+    monkeypatch.setattr("siteground_ops.cli.build_novamira_runner", lambda _site: FakeNovamiraRunner())
+
+    exit_code = main(
+        [
+            "--config",
+            str(path),
+            "cache-purge",
+            "prod",
+            "--transport",
+            "novamira",
+            "--confirm-target",
+            "prod",
+            "--recovery-receipt",
+            "test-recovery-123",
+        ]
+    )
+    receipt = read_receipt(capsys)
+
+    assert exit_code == 0
+    assert receipt["ok"] is True
+    assert receipt["operation"] == "cache-purge"
+    assert receipt["mutation_state"] == "applied"
+    assert receipt["evidence"]["transport"] == "novamira"
+    assert receipt["evidence"]["command"].startswith("novamira")
+

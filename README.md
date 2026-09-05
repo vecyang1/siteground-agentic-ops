@@ -20,9 +20,11 @@ paths.
 siteground-ops sites
 siteground-ops doctor <site-id> [--transport auto|ssh|novamira]
 siteground-ops inventory <site-id> [--transport auto|ssh|novamira]
+siteground-ops onboard <site-id> [--transport auto|ssh|novamira]
+siteground-ops cache-status <site-id> [--transport auto|ssh|novamira]
+siteground-ops cache-purge <site-id> [--transport auto|ssh|novamira] --confirm-target <site-id> --recovery-receipt <receipt>
 siteground-ops wp-admin <site-id-or-domain> [--app <id>] [--foreground]
 siteground-ops portal read <account> wp-apps
-siteground-ops cache-purge <site-id> --confirm-target <site-id> --recovery-receipt <receipt>
 siteground-ops novamira-update check
 siteground-ops novamira-update baseline --confirm-version 1.1.0
 siteground-ops novamira-update apply --confirm-version 1.1.0
