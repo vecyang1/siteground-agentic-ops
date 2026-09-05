@@ -119,6 +119,7 @@ def test_site_tools_links_are_exact_allowlisted_https_routes() -> None:
         "backups": "https://tools.siteground.com/backup-restore-manage?siteId=EXAMPLESITEID003",
         "cache": "https://tools.siteground.com/cacher?siteId=EXAMPLESITEID003",
         "wordpress_management": "https://tools.siteground.com/wp-manage?siteId=EXAMPLESITEID003",
+        "ssh": "https://tools.siteground.com/ssh?siteId=EXAMPLESITEID003",
         "wordpress_admin": "https://example.com/wp-admin/",
     }
 

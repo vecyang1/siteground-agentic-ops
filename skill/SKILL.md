@@ -142,7 +142,8 @@ exists to make truthfully.
 - WordPress admin sign-in: `wp-admin`, through the portal's own autologin API
   on the signed-in Chrome profile. The portal access token stays in that
   profile's `localStorage`; profiles store no token and no WordPress password.
-- Site Tools account controls (provider backups, staging, DNS, SSL, PHP, email accounts): UI/OpenCLI fallback only until SiteGround publishes a stable API.
+- Site Tools account controls (provider backups, staging, DNS, SSL, PHP, email accounts, SSH Key Manager): UI/OpenCLI fallback or direct link generation (`siteground-ops portal links <site-id>`).
+- Site onboarding & provisioning: See `references/site-onboarding-runbook.md` for the standard contract covering temporary vs custom domains, Novamira connection, SSH key provisioning, Speed Optimizer caching, Turnstile, and SureCart integration.
 - SiteGround AI Agent is an optional interactive second operator. It is not an unattended API contract; impactful actions require its Power Mode.
 
 ## Mutation contract

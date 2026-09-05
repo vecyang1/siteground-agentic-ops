@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Stop the oversized-bridge-stream test from racing a wall clock. It pinned
+  `NOVAMIRA_TIMEOUT_SECONDS` to 0.5s while the happy path measures 0.26-0.35s,
+  so the byte guard and the deadline were in a 1.5x race and the deadline
+  sometimes won -- reporting `TimeoutExpired` where the test demanded
+  `output limit`. It failed about one isolated run in six and both parameters
+  under full-suite load, which is the worst kind of gate: red often enough to
+  train a reader to scroll past `FAILED`, green often enough to survive review.
+  The product code was never wrong. Note what the budget was actually racing:
+  the `[stderr]` case trips its 64 KB limit on the *first* read and failed too,
+  so the cost is child interpreter startup, not the read loop, and no amount of
+  tightening the loop would have helped. The budget is now 10s with the
+  reasoning recorded beside it, because the next reader's instinct will be to
+  tighten it again. The child still sleeps well past the trip, so the guard is
+  the only thing that can raise, and a regression still fails -- as DID NOT
+  RAISE rather than as a wrong error. Mutation-checked both directions:
+  disabling the guard turns both parameters red, restoring it turns them green,
+  and the fixed test passed 10 consecutive isolated runs plus two full suites.
+
 - Fix the candidate sandbox, which could never execute the CLI it was built to
   grade. `profile_inventory` and `offline_doctor` run the entry point under
   `sandbox-exec`, and the profile allowed `process-exec` on Bun only, while the

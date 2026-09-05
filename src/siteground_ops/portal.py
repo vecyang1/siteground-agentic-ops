@@ -130,6 +130,7 @@ SITE_TOOLS_ROUTES = {
     "backups": "backup-restore-manage",
     "cache": "cacher",
     "wordpress_management": "wp-manage",
+    "ssh": "ssh",
 }
 
 _SAFE_LOCALE = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
