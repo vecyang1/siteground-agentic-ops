@@ -69,6 +69,8 @@ def test_portal_links_do_not_invoke_a_browser(
     assert exit_code == 0
     assert payload["operation"] == "portal-links"
     assert payload["evidence"]["links"]["dashboard"].startswith("https://tools.siteground.com/")
+    assert payload["evidence"]["links"]["ssh"].startswith("https://tools.siteground.com/ssh")
+    assert payload["evidence"]["links"]["cache"].startswith("https://tools.siteground.com/cacher")
 
 
 def test_portal_read_failure_is_isolated_and_structured(

@@ -242,7 +242,15 @@ def test_default_novamira_runner_terminates_oversized_bridge_stream(
         "time.sleep(5)\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(runner_module, "NOVAMIRA_TIMEOUT_SECONDS", 0.5)
+    # Generous on purpose: the child sleeps well past the limit trip, so the byte
+    # guard is the only thing that can raise and the deadline never arrives. A
+    # tight budget here does not test the guard harder -- it races child
+    # interpreter startup (0.26-0.35s measured) against the deadline, and the
+    # loser reports TimeoutExpired, which reads as a broken guard. Measured
+    # 2026-08-26: at 0.5s this failed ~1 run in 6 alone and both parameters under
+    # full-suite load. If the guard ever regresses, the child exits on its own
+    # and the test still fails -- just as DID NOT RAISE instead of a wrong error.
+    monkeypatch.setattr(runner_module, "NOVAMIRA_TIMEOUT_SECONDS", 10.0)
     runner = runner_module.NovamiraMcpRunner(site(tmp_path), script_path=script)
 
     with pytest.raises(RunnerError, match="output limit"):
