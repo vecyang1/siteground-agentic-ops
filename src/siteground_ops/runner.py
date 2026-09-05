@@ -177,7 +177,8 @@ CACHE_PURGE_PHP = r'''
 $purged = false;
 $method = "none";
 if (function_exists("sg_cachepress_purge_everything")) {
-    $purged = (bool) sg_cachepress_purge_everything();
+    sg_cachepress_purge_everything();
+    $purged = true;
     $method = "sg_cachepress_purge_everything";
 } elseif (class_exists("SiteGround_Optimizer\\Supercacher\\Supercacher")) {
     $instance = \SiteGround_Optimizer\Supercacher\Supercacher::get_instance();
@@ -229,6 +230,19 @@ def probe_public_cache_headers(public_url: str, *, timeout: float = 15.0) -> dic
                 "x_proxy_cache": headers.get("x-proxy-cache"),
                 "x_proxy_cache_info": headers.get("x-proxy-cache-info"),
             }
+    except urllib.error.HTTPError as exc:
+        headers = exc.headers
+        return {
+            "ok": False,
+            "http_status": exc.code,
+            "error": str(exc),
+            "server": headers.get("server") if headers else None,
+            "x_cache_enabled": headers.get("x-cache-enabled") if headers else None,
+            "sg_f_cache": headers.get("sg-f-cache") if headers else None,
+            "cache_control": headers.get("cache-control") if headers else None,
+            "x_proxy_cache": headers.get("x-proxy-cache") if headers else None,
+            "x_proxy_cache_info": headers.get("x-proxy-cache-info") if headers else None,
+        }
     except Exception as exc:
         return {
             "ok": False,
@@ -879,6 +893,8 @@ class NovamiraMcpRunner:
 
     def purge_cache(self, request_id: str) -> dict[str, Any]:
         value = self._execute_php(CACHE_PURGE_PHP)
+        if value.get("method") == "none" or not value.get("purged"):
+            raise RunnerError("SiteGround Speed Optimizer cache purge method unavailable or purge failed.")
         request = urllib.request.Request(
             self.site.public_url + "/",
             headers={"User-Agent": "siteground-ops/0.1 readback"},
