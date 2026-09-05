@@ -173,6 +173,74 @@ return array(
 );
 '''.strip()
 
+CACHE_PURGE_PHP = r'''
+$purged = false;
+$method = "none";
+if (function_exists("sg_cachepress_purge_everything")) {
+    $purged = (bool) sg_cachepress_purge_everything();
+    $method = "sg_cachepress_purge_everything";
+} elseif (class_exists("SiteGround_Optimizer\\Supercacher\\Supercacher")) {
+    $instance = \SiteGround_Optimizer\Supercacher\Supercacher::get_instance();
+    $purged = (bool) $instance->purge_everything();
+    $method = "Supercacher::purge_everything";
+}
+return array(
+    "home_url" => home_url(),
+    "purged" => $purged,
+    "method" => $method,
+);
+'''.strip()
+
+CACHE_STATUS_PHP = r'''
+$opt = class_exists("SiteGround_Optimizer\\Options\\Options") ? new \SiteGround_Optimizer\Options\Options() : null;
+$options = $opt ? $opt->fetch_options() : array();
+return array(
+    "home_url" => home_url(),
+    "optimizer_active" => (
+        defined("SG_CACHEPRESS_VERSION") ||
+        function_exists("sg_cachepress_purge_everything")
+    ),
+    "enable_cache" => !empty($options["enable_cache"]),
+    "autoflush_cache" => !empty($options["autoflush_cache"]),
+    "file_caching" => !empty($options["file_caching"]),
+    "dynamic_cache" => !empty($options["dynamic_cache"]),
+);
+'''.strip()
+
+
+def probe_public_cache_headers(public_url: str, *, timeout: float = 15.0) -> dict[str, Any]:
+    req = urllib.request.Request(
+        public_url.rstrip("/") + "/",
+        headers={"User-Agent": "siteground-ops/0.1 cache-probe"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            headers = response.headers
+            status = response.status
+            response.read(512)
+            return {
+                "ok": 200 <= status < 400,
+                "http_status": status,
+                "server": headers.get("server"),
+                "x_cache_enabled": headers.get("x-cache-enabled"),
+                "sg_f_cache": headers.get("sg-f-cache"),
+                "cache_control": headers.get("cache-control"),
+                "x_proxy_cache": headers.get("x-proxy-cache"),
+                "x_proxy_cache_info": headers.get("x-proxy-cache-info"),
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "server": None,
+            "x_cache_enabled": None,
+            "sg_f_cache": None,
+            "cache_control": None,
+            "x_proxy_cache": None,
+            "x_proxy_cache_info": None,
+        }
+
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
@@ -622,6 +690,22 @@ class ParamikoWpCliRunner:
             },
         }
 
+    def cache_status(self) -> dict[str, Any]:
+        values = self._run_many(
+            [
+                ("home_url", ["option", "get", "home"], False),
+                ("siteground_cache_cli", ["sg", "--help"], True),
+            ]
+        )
+        return {
+            "home_url": values["home_url"],
+            "optimizer_active": values["siteground_cache_cli"] is not None,
+            "enable_cache": values["siteground_cache_cli"] is not None,
+            "autoflush_cache": None,
+            "file_caching": None,
+            "dynamic_cache": None,
+        }
+
     @staticmethod
     def _normalized_origin(value: str | None) -> str:
         if not value:
@@ -792,6 +876,47 @@ class NovamiraMcpRunner:
         record = dict(row)
         record["id"] = record.get("id") or record["name"]
         return record
+
+    def purge_cache(self, request_id: str) -> dict[str, Any]:
+        value = self._execute_php(CACHE_PURGE_PHP)
+        request = urllib.request.Request(
+            self.site.public_url + "/",
+            headers={"User-Agent": "siteground-ops/0.1 readback"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                status = response.status
+                cache_header = response.headers.get("x-proxy-cache")
+                final_url = response.geturl()
+                response.read(1024)
+        except Exception as exc:
+            raise RunnerError(f"Public readback failed: {exc}") from exc
+        if not 200 <= status < 400:
+            raise RunnerError(f"Public readback returned HTTP {status}.")
+        if ParamikoWpCliRunner._normalized_origin(final_url) != ParamikoWpCliRunner._normalized_origin(self.site.public_url):
+            raise RunnerError("Public readback redirected to a different origin.")
+        return {
+            "command": f"novamira {value.get('method', 'sg_cachepress_purge_everything')}()",
+            "command_output": f"purged={value.get('purged')}",
+            "request_id": request_id,
+            "readback": {
+                "home_url": value.get("home_url"),
+                "http_status": status,
+                "x_proxy_cache": cache_header,
+            },
+        }
+
+    def cache_status(self) -> dict[str, Any]:
+        value = self._execute_php(CACHE_STATUS_PHP)
+        return {
+            "home_url": value.get("home_url"),
+            "optimizer_active": bool(value.get("optimizer_active")),
+            "enable_cache": bool(value.get("enable_cache")),
+            "autoflush_cache": bool(value.get("autoflush_cache")),
+            "file_caching": bool(value.get("file_caching")),
+            "dynamic_cache": bool(value.get("dynamic_cache")),
+        }
 
 
 def build_novamira_runner(site: SiteConfig) -> NovamiraMcpRunner:

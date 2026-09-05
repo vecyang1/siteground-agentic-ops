@@ -26,8 +26,10 @@ from .portal import (
 from .receipts import receipt
 from .runner import (
     RunnerError,
+    build_novamira_runner,
     build_read_runner,
     build_runner,
+    probe_public_cache_headers,
     read_transport_status,
     ssh_local_readiness_issues,
 )
@@ -52,6 +54,13 @@ def parser() -> argparse.ArgumentParser:
     purge.add_argument("target")
     purge.add_argument("--confirm-target")
     purge.add_argument("--recovery-receipt")
+    purge.add_argument("--transport", choices=("auto", "ssh", "novamira"), default="auto")
+    cache_status = commands.add_parser("cache-status")
+    cache_status.add_argument("target")
+    cache_status.add_argument("--transport", choices=("auto", "ssh", "novamira"), default="auto")
+    onboard = commands.add_parser("onboard")
+    onboard.add_argument("target")
+    onboard.add_argument("--transport", choices=("auto", "ssh", "novamira"), default="auto")
     novamira = commands.add_parser("novamira-update")
     novamira_commands = novamira.add_subparsers(dest="update_action", required=True)
     novamira_commands.add_parser("check")
@@ -588,6 +597,150 @@ def handle_wp_admin(args: argparse.Namespace, config: OpsConfig, request_id: str
     return 0
 
 
+def handle_cache_status(args: argparse.Namespace, config: OpsConfig, request_id: str) -> int:
+    site = _site(config, args.target, "cache-status", request_id)
+    if site is None:
+        return 2
+
+    public_headers = probe_public_cache_headers(site.public_url)
+    app_status = None
+    warnings: list[str] = []
+    try:
+        selected_transport, runner = build_read_runner(site, getattr(args, "transport", "auto"))
+        if hasattr(runner, "cache_status"):
+            app_status = runner.cache_status()
+            app_status["transport"] = selected_transport
+    except Exception as exc:
+        warnings.append(f"Could not read WordPress in-app cache configuration: {exc}")
+
+    cacher_link = (
+        f"https://tools.siteground.com/cacher?siteId={site.portal_site_id}"
+        if site.portal_site_id
+        else None
+    )
+    edge_enabled = public_headers.get("x_cache_enabled") == "True"
+    if not edge_enabled and cacher_link:
+        warnings.append(
+            f"SiteGround Nginx edge cache reports x-cache-enabled={public_headers.get('x_cache_enabled')!r}. "
+            f"Toggle Dynamic Cache ON in Site Tools: {cacher_link}"
+        )
+
+    evidence = {
+        "public_url": site.public_url,
+        "portal_site_id": site.portal_site_id,
+        "cacher_link": cacher_link,
+        "edge_headers": public_headers,
+        "wordpress_app_status": app_status,
+        "edge_cache_active": edge_enabled,
+    }
+    emit(
+        receipt(
+            ok=True,
+            operation="cache-status",
+            target=site.site_id,
+            mutation_state="not_applicable",
+            request_id=request_id,
+            evidence=evidence,
+            warnings=warnings,
+        )
+    )
+    return 0
+
+
+def handle_onboard(args: argparse.Namespace, config: OpsConfig, request_id: str) -> int:
+    site = _site(config, args.target, "onboard", request_id)
+    if site is None:
+        return 2
+
+    parsed_url = urlsplit(site.public_url)
+    hostname = parsed_url.hostname or ""
+    is_temporary_domain = "sg-host.com" in hostname.lower()
+
+    links = (
+        site_tools_links(site)
+        if site.portal_site_id
+        else {}
+    )
+
+    transport_status = read_transport_status(site)
+    public_headers = probe_public_cache_headers(site.public_url)
+
+    stack_inventory = None
+    warnings: list[str] = []
+    try:
+        selected_transport, runner = build_read_runner(site, getattr(args, "transport", "auto"))
+        doc = runner.doctor()
+        inv = runner.inventory()
+        stack_inventory = {
+            "transport": selected_transport,
+            "wordpress_version": doc.get("wordpress_version"),
+            "optimizer_active": doc.get("siteground_optimizer_active"),
+            "plugins": {p["id"]: p.get("version") for p in inv.get("plugins", [])},
+        }
+    except Exception as exc:
+        warnings.append(f"In-app stack audit could not complete: {exc}")
+
+    plugins_dict = stack_inventory.get("plugins", {}) if stack_inventory else {}
+    checklist = {
+        "site_profile_registered": True,
+        "temporary_domain": is_temporary_domain,
+        "portal_mapped": bool(site.portal_site_id),
+        "transport_ready": bool(transport_status.get("available")),
+        "wordpress_reachable": stack_inventory is not None,
+        "speed_optimizer_active": bool(stack_inventory and stack_inventory.get("optimizer_active")),
+        "surecart_installed": "surecart" in plugins_dict,
+        "turnstile_installed": "simple-cloudflare-turnstile" in plugins_dict,
+        "fluent_forms_installed": "fluentform" in plugins_dict,
+        "edge_cache_enabled": public_headers.get("x_cache_enabled") == "True",
+    }
+
+    next_steps = []
+    if not checklist["edge_cache_enabled"] and links.get("cache"):
+        next_steps.append(
+            f"1. Enable SiteGround Nginx SuperCacher in Site Tools: {links['cache']}"
+        )
+    if not checklist["turnstile_installed"]:
+        next_steps.append("2. Install & activate simple-cloudflare-turnstile plugin.")
+    else:
+        next_steps.append("2. Verify Turnstile keys in WP Admin -> Settings -> Cloudflare Turnstile.")
+    if checklist["surecart_installed"]:
+        next_steps.append("3. Connect SureCart API Token & Stripe payment gateway in WP Admin -> SureCart.")
+    if is_temporary_domain:
+        next_steps.append(
+            "4. Phase 2 Cutover: When ready for custom domain, use cloudflare-dns-manager to point DNS, "
+            "change primary domain in Site Tools, and run search-replace on database."
+        )
+
+    evidence = {
+        "site_id": site.site_id,
+        "label": site.label,
+        "environment": site.environment,
+        "public_url": site.public_url,
+        "domain_type": "temporary_sg_host" if is_temporary_domain else "custom",
+        "portal_account": site.portal_account,
+        "portal_site_id": site.portal_site_id,
+        "links": links,
+        "transports": transport_status,
+        "public_edge": public_headers,
+        "stack": stack_inventory,
+        "checklist": checklist,
+        "next_steps": next_steps,
+    }
+
+    emit(
+        receipt(
+            ok=True,
+            operation="onboard",
+            target=site.site_id,
+            mutation_state="not_applicable",
+            request_id=request_id,
+            evidence=evidence,
+            warnings=warnings,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     request_id = str(uuid.uuid4())
@@ -640,6 +793,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     site = _site(config, args.target, args.operation, request_id)
     if site is None:
         return 2
+
+    if args.operation == "cache-status":
+        return handle_cache_status(args, config, request_id)
+
+    if args.operation == "onboard":
+        return handle_onboard(args, config, request_id)
 
     if args.operation == "doctor":
         try:
@@ -729,7 +888,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    if ssh_local_readiness_issues(site):
+    transport = getattr(args, "transport", "auto")
+    if transport in {"auto", "ssh"}:
+        if ssh_local_readiness_issues(site):
+            emit(
+                receipt(
+                    ok=False,
+                    operation="cache-purge",
+                    target=site.site_id,
+                    mutation_state="refused",
+                    request_id=request_id,
+                    safe_next_action="Configure and verify the SSH/WP-CLI transport before any cache mutation.",
+                    diagnostics={"code": "ssh_mutation_transport_required"},
+                )
+            )
+            return 2
+        runner = build_runner(site)
+    elif transport == "novamira":
+        if not site.novamira_server:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="cache-purge",
+                    target=site.site_id,
+                    mutation_state="refused",
+                    request_id=request_id,
+                    safe_next_action="Site has no configured novamira_server.",
+                    diagnostics={"code": "novamira_server_missing"},
+                )
+            )
+            return 2
+        try:
+            runner = build_novamira_runner(site)
+        except RunnerError as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="cache-purge",
+                    target=site.site_id,
+                    mutation_state="refused",
+                    request_id=request_id,
+                    safe_next_action="Configure and verify the Novamira MCP transport before any cache mutation.",
+                    diagnostics={"code": "novamira_transport_unavailable", "message": str(exc)},
+                )
+            )
+            return 2
+    else:
         emit(
             receipt(
                 ok=False,
@@ -737,8 +941,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target=site.site_id,
                 mutation_state="refused",
                 request_id=request_id,
-                safe_next_action="Configure and verify the SSH/WP-CLI transport before any cache mutation.",
-                diagnostics={"code": "ssh_mutation_transport_required"},
+                safe_next_action="Choose a valid transport: auto, ssh, or novamira.",
+                diagnostics={"code": "invalid_transport"},
             )
         )
         return 2
@@ -760,7 +964,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        evidence = build_runner(site).purge_cache(request_id)
+        evidence = runner.purge_cache(request_id)
+        evidence["transport"] = transport
     except TimeoutError as exc:
         emit(
             receipt(
