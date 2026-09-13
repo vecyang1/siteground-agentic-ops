@@ -60,7 +60,7 @@ PORTAL_PLUGIN_ACCESS: dict[str, str] = {
 PORTAL_PLUGIN_COMMANDS = frozenset(PORTAL_PLUGIN_ACCESS)
 PORTAL_PLUGIN_SOURCE_SHA256 = {
     "_runtime.js": "81f5f4954c2e7797d23215cc981c736f6befc261eead64398283b1826b10c78d",
-    "_schema.js": "d18ec76b1b94c988b5d555c8fdf2d937fb8d826ebf9f548948c9010a2ebfbae3",
+    "_schema.js": "5eaf81916cf9c0e39008959c99eb37c056f735de1b96fc46ac59f06db05f3938",
     "_ui.js": "f92f4a8e23a846127ae5981ac67af1e8af13121712ab9c76f11db21391f7907e",
     "_wp.js": "113cc0fc5bf89fbac30ada9b0a1abe23b06ae1ef236318b23585a22b10a84ec6",
     "billing-methods.js": "ab9f4be6ac4106723c908f960ff4c7d17234f403701c86ff16735f0e6ce10f5f",

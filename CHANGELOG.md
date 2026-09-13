@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Add `quota` subcommands (`check`, `diagnose`, `triage`, `record`) with
+  first-principles diagnostic and remediation engine. Supports parsing SiteGround
+  portal telemetry (inodes, web space, program executions peak), in-depth Novamira/SSH
+  site probing (reclaimable `upgrade-temp-backup` inodes, top plugin inodes,
+  `/home/customer/.opcache`, virtual `wp-cron` avalanches and heavy hook analysis,
+  dynamic cache configuration, unauthenticated XML-RPC exposure, and crawler/facet
+  query storm detection from access logs), and holistic multi-site triage synthesis
+  with prioritized remediation actions (`BOT_SCRAPER_DEFENSE`, `INODES_RECLAMATION`,
+  `CRON_STABILIZATION`, `SECURITY_HARDENING`).
+
+- Standardize `siteground-ops` skill documentation with `## Skill Metadata` and
+  `## Gotchas`. Add gotcha warning that staging targets (`*.sg-host.com`) are
+  mutable scratchpads that must never have their current identity inferred from
+  historical task logs (e.g. `vectory43.sg-host.com` serving as Bokksu's `design-md`
+  mock page). Enforce live runtime probing per `starting-with-readiness` and
+  `skill-creator` principles. Update staging profile labels in `sites.json`.
+
 - Add `onboard` and `cache-status` subcommands, plus Novamira transport support
   for `cache-purge`. Enables full agentic diagnostics and readiness verification
   for newly provisioned SiteGround sites without requiring immediate SSH access.

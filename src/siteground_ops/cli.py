@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 from urllib.parse import urlsplit
@@ -22,6 +23,19 @@ from .portal import (
     PortalUnknownOutcomeError,
     build_portal_adapter,
     site_tools_links,
+)
+from .quota import (
+    DEFAULT_HOURLY_EXECUTION_LIMIT,
+    DEFAULT_INODES_LIMIT,
+    DEFAULT_WEB_SPACE_GB_LIMIT,
+    PlanQuotaSnapshot,
+    QuotaMetric,
+    QuotaSeverity,
+    QuotaStore,
+    QuotaTriageEngine,
+    SiteDeepDiagnosis,
+    SiteQuotaShare,
+    probe_site_deep,
 )
 from .receipts import receipt
 from .runner import (
@@ -94,6 +108,34 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Raise the browser window. Off by default so the tab opens quietly.",
     )
+    quota = commands.add_parser("quota")
+    quota_commands = quota.add_subparsers(dest="quota_action", required=True)
+
+    quota_check = quota_commands.add_parser("check")
+    quota_check.add_argument("--plan", dest="plan_id")
+    quota_check.add_argument("--telemetry", type=Path)
+
+    quota_diagnose = quota_commands.add_parser("diagnose")
+    quota_diagnose.add_argument("target")
+    quota_diagnose.add_argument("--transport", choices=("auto", "ssh", "novamira"), default="auto")
+
+    quota_triage = quota_commands.add_parser("triage")
+    quota_triage.add_argument("target")
+    quota_triage.add_argument("--plan", dest="plan_id", help="Exact hosting plan id to triage against")
+    quota_triage.add_argument("--telemetry", type=Path)
+
+    quota_record = quota_commands.add_parser("record")
+    quota_record.add_argument("--plan", dest="plan_id", required=True)
+    quota_record.add_argument("--name", dest="plan_name", default="")
+    quota_record.add_argument("--inodes-used", type=int)
+    quota_record.add_argument("--inodes-limit", type=int, default=DEFAULT_INODES_LIMIT)
+    quota_record.add_argument("--web-space-used-gb", type=float)
+    quota_record.add_argument("--web-space-limit-gb", type=float, default=DEFAULT_WEB_SPACE_GB_LIMIT)
+    quota_record.add_argument("--executions-peak", type=int)
+    quota_record.add_argument("--executions-limit", type=int, default=DEFAULT_HOURLY_EXECUTION_LIMIT)
+    quota_record.add_argument("--cpu-alert", action="store_true")
+    quota_record.add_argument("--data", help="Raw JSON snapshot string")
+    quota_record.add_argument("--file", type=Path, help="Path to JSON snapshot file")
     return root
 
 
@@ -597,6 +639,283 @@ def handle_wp_admin(args: argparse.Namespace, config: OpsConfig, request_id: str
     return 0
 
 
+def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -> int:
+    store = QuotaStore()
+    action = args.quota_action
+
+    if action == "record":
+        plan_id = args.plan_id
+        if args.file:
+            try:
+                raw_data = json.loads(args.file.read_text(encoding="utf-8"))
+                snapshot = PlanQuotaSnapshot.from_dict(raw_data)
+            except Exception as exc:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-record",
+                        target=plan_id,
+                        mutation_state="refused",
+                        request_id=request_id,
+                        safe_next_action="Provide a valid JSON snapshot file.",
+                        diagnostics={"code": "invalid_snapshot_file", "message": str(exc)},
+                    )
+                )
+                return 2
+        elif args.data:
+            try:
+                raw_data = json.loads(args.data)
+                snapshot = PlanQuotaSnapshot.from_dict(raw_data)
+            except Exception as exc:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-record",
+                        target=plan_id,
+                        mutation_state="refused",
+                        request_id=request_id,
+                        safe_next_action="Provide valid JSON in --data.",
+                        diagnostics={"code": "invalid_snapshot_json", "message": str(exc)},
+                    )
+                )
+                return 2
+        else:
+            observed_at = (
+                datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            )
+            snapshot = PlanQuotaSnapshot(
+                plan_id=plan_id,
+                plan_name=args.plan_name or f"Plan {plan_id}",
+                observed_at=observed_at,
+                web_space_limit_gb=float(args.web_space_limit_gb or DEFAULT_WEB_SPACE_GB_LIMIT),
+                web_space_used_gb=float(args.web_space_used_gb or 0.0),
+                inodes_limit=int(args.inodes_limit or DEFAULT_INODES_LIMIT),
+                inodes_used=int(args.inodes_used or 0),
+                hourly_execution_limit=int(args.executions_limit or DEFAULT_HOURLY_EXECUTION_LIMIT),
+                hourly_execution_peak=int(args.executions_peak or 0),
+                cpu_seconds_alert=bool(args.cpu_alert),
+                source="cli_record",
+            )
+
+        saved_path = store.save_snapshot(snapshot)
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-record",
+                target=plan_id,
+                mutation_state="applied",
+                request_id=request_id,
+                evidence={
+                    "plan_id": plan_id,
+                    "saved_path": str(saved_path),
+                    "snapshot": snapshot.to_dict(),
+                },
+            )
+        )
+        return 0
+
+    if action == "check":
+        snapshot = None
+        plan_id = getattr(args, "plan_id", None)
+        if args.telemetry:
+            try:
+                raw = json.loads(args.telemetry.read_text(encoding="utf-8"))
+                snapshot = PlanQuotaSnapshot.from_dict(raw)
+            except Exception as exc:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-check",
+                        target=plan_id,
+                        mutation_state="not_applicable",
+                        request_id=request_id,
+                        safe_next_action="Provide a valid telemetry file.",
+                        diagnostics={"code": "telemetry_load_failed", "message": str(exc)},
+                    )
+                )
+                return 2
+        elif plan_id:
+            snapshot = store.load_snapshot(plan_id)
+
+        if snapshot is None and not plan_id:
+            for s in config.sites.values():
+                if s.portal_plan_id:
+                    plan_id = s.portal_plan_id
+                    snapshot = store.load_snapshot(plan_id)
+                    if snapshot:
+                        break
+
+        if snapshot is None:
+            if plan_id:
+                snapshot = PlanQuotaSnapshot(
+                    plan_id=plan_id,
+                    plan_name=f"Plan {plan_id}",
+                    observed_at=(
+                        datetime.now(timezone.utc)
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    ),
+                )
+            else:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-check",
+                        target=None,
+                        mutation_state="not_applicable",
+                        request_id=request_id,
+                        safe_next_action="Specify an exact --plan or record a telemetry snapshot first.",
+                        diagnostics={"code": "plan_unresolved"},
+                    )
+                )
+                return 2
+
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-check",
+                target=snapshot.plan_id,
+                mutation_state="not_applicable",
+                request_id=request_id,
+                evidence={
+                    "plan_id": snapshot.plan_id,
+                    "plan_name": snapshot.plan_name,
+                    "observed_at": snapshot.observed_at,
+                    "severity": snapshot.overall_severity,
+                    "metrics": {k: m.to_dict() for k, m in snapshot.metrics.items()},
+                    "top_sites_by_inodes": [s.to_dict() for s in snapshot.top_sites_by_inodes()],
+                },
+            )
+        )
+        return 0
+
+    if action == "diagnose":
+        target = args.target
+        site = _site(config, target, "quota-diagnose", request_id)
+        if site is None:
+            return 2
+
+        try:
+            diagnosis = probe_site_deep(site)
+        except Exception as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="quota-diagnose",
+                    target=site.site_id,
+                    mutation_state="not_applicable",
+                    request_id=request_id,
+                    safe_next_action="Check site transport connectivity and retry.",
+                    diagnostics={"code": "probe_failed", "message": str(exc)},
+                )
+            )
+            return 2
+
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-diagnose",
+                target=site.site_id,
+                mutation_state="not_applicable",
+                request_id=request_id,
+                evidence=diagnosis.to_dict(),
+            )
+        )
+        return 0
+
+    if action == "triage":
+        target = args.target
+        plan_id = getattr(args, "plan_id", None)
+        sites_to_probe: list[SiteConfig] = []
+
+        if target in config.sites:
+            target_site = config.sites[target]
+            if not plan_id and target_site.portal_plan_id:
+                plan_id = target_site.portal_plan_id
+            sites_to_probe.append(target_site)
+
+        # If plan_id is not yet resolved, attempt lookup via store for target site domain
+        if not plan_id and sites_to_probe:
+            site_domain = sites_to_probe[0].public_url.replace("https://", "").replace("http://", "").rstrip("/")
+            plan_id = store.find_plan_for_domain(site_domain)
+
+        # If still unresolved, default to target
+        if not plan_id:
+            plan_id = target
+
+        for s in config.sites.values():
+            if s.portal_plan_id == plan_id and s not in sites_to_probe:
+                sites_to_probe.append(s)
+
+        snapshot = store.load_snapshot(plan_id)
+        if args.telemetry:
+            try:
+                raw = json.loads(args.telemetry.read_text(encoding="utf-8"))
+                snapshot = PlanQuotaSnapshot.from_dict(raw)
+            except Exception:
+                pass
+
+        if snapshot and not sites_to_probe:
+            for domain in snapshot.site_shares:
+                for s in config.sites.values():
+                    if domain in s.public_url and s not in sites_to_probe:
+                        sites_to_probe.append(s)
+
+        if not sites_to_probe and target in config.sites:
+            sites_to_probe = [config.sites[target]]
+
+        if snapshot is None:
+            snapshot = PlanQuotaSnapshot(
+                plan_id=plan_id,
+                plan_name=f"Plan {plan_id}",
+                observed_at=(
+                    datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+            )
+
+        diagnoses: list[SiteDeepDiagnosis] = []
+        warnings: list[str] = []
+        for s in sites_to_probe:
+            try:
+                diag = probe_site_deep(s)
+                diagnoses.append(diag)
+            except Exception as exc:
+                warnings.append(f"Site {s.site_id} deep probe skipped: {exc}")
+
+        engine = QuotaTriageEngine()
+        report = engine.triage(snapshot, diagnoses)
+
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-triage",
+                target=plan_id,
+                mutation_state="not_applicable",
+                request_id=request_id,
+                warnings=warnings,
+                evidence=report.to_dict(),
+            )
+        )
+        return 0
+
+    emit(
+        receipt(
+            ok=False,
+            operation="quota",
+            target=None,
+            mutation_state="not_applicable",
+            request_id=request_id,
+            safe_next_action="Specify a valid quota action: check, diagnose, triage, record.",
+            diagnostics={"code": "invalid_quota_action"},
+        )
+    )
+    return 2
+
+
 def handle_cache_status(args: argparse.Namespace, config: OpsConfig, request_id: str) -> int:
     site = _site(config, args.target, "cache-status", request_id)
     if site is None:
@@ -767,6 +1086,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.operation == "wp-admin":
         return handle_wp_admin(args, config, request_id)
+
+    if args.operation == "quota":
+        return handle_quota(args, config, request_id)
 
     if args.operation == "sites":
         summaries = []
