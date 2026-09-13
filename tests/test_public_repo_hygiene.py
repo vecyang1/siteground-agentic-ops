@@ -58,6 +58,8 @@ ALLOWED = frozenset({
     "gnu.org",
     "fsf.org",
     "shields.io",  # README license badge
+    "pypi.org",
+    "pythonhosted.org",
 })
 
 # A bare dotted-token regex is unusable here: `args.target`, `array.from` and

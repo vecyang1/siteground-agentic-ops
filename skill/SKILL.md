@@ -27,6 +27,7 @@ siteground-ops onboard <exact-site-id> [--transport auto|ssh|novamira]
 siteground-ops quota check [--plan <plan-id>]
 siteground-ops quota diagnose <exact-site-id> [--transport auto|ssh|novamira]
 siteground-ops quota triage <exact-site-id|plan-id> [--plan <plan-id>]
+siteground-ops quota clean <exact-site-id> --target-dir <dir> [--dry-run]
 ```
 
 Use the exact target returned by `sites`. `ready` reports the primary adapter;
@@ -190,9 +191,19 @@ siteground-ops quota diagnose <exact-site-id> [--transport auto|ssh|novamira]
 # Holistic plan-level synthesis and prioritized remediation actions
 siteground-ops quota triage <exact-site-id|plan-id> [--plan <plan-id>]
 
+# Safe closed-loop inode cleanup (supports dry-run preview and requires confirmation & recovery receipt for execution)
+siteground-ops quota clean <exact-site-id> --target-dir {cache,upgrade-temp-backup,wp-staging} --dry-run
+siteground-ops quota clean <exact-site-id> --target-dir {cache,upgrade-temp-backup,wp-staging} --confirm-target <exact-site-id> --recovery-receipt <receipt>
+
 # Record or update telemetry snapshots manually from portal statistics
 siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-peak <hourly-peak> [--cpu-alert]
 ```
+
+### Safe Inode Cleanup (`quota clean`)
+
+- **Allowed Targets**: Strictly restricted to `upgrade-temp-backup`, `wp-staging`, and `cache` inside `wp-content/`. Any attempt to target critical paths (e.g. `plugins`, `uploads`, or relative path escapes) is refused before execution.
+- **Fail-Closed Mutation Contract**: Unless `--dry-run` is passed, the CLI refuses execution (exit `2`, `mutation_state: refused`) without `--confirm-target <exact-site-id>` and `--recovery-receipt <receipt>`.
+- **Dual Transport Support**: Uses safe recursive PHP deletion via Novamira MCP for Novamira sites, and atomic `find -delete` with `rm -rf` fallback over SSH for SSH sites. Returns verified count of observed and deleted files.
 
 ### High-signal diagnostic findings & culprits
 

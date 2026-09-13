@@ -41,6 +41,19 @@ EXHAUSTED_PERCENT = 100.0
 DEFAULT_QUOTA_STORE_DIR = Path.home() / ".config" / "siteground-ops" / "quota_telemetry"
 
 
+def domains_match(domain1: str, domain2: str) -> bool:
+    """Return True if two domains match exactly or one is a subdomain of the other."""
+    d1 = domain1.lower().replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip()
+    d2 = domain2.lower().replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip()
+    if not d1 or not d2:
+        return False
+    if d1 == d2:
+        return True
+    if d1.endswith("." + d2) or d2.endswith("." + d1):
+        return True
+    return False
+
+
 def evaluate_metric_severity(
     used: float,
     limit: float,
@@ -287,7 +300,6 @@ class QuotaStore:
         return sorted(res)
 
     def find_plan_for_domain(self, domain: str) -> str | None:
-        clean_domain = domain.lower().replace("https://", "").replace("http://", "").rstrip("/")
         if not self.directory.is_dir():
             return None
         for file in sorted(self.directory.glob("*.json")):
@@ -296,8 +308,7 @@ class QuotaStore:
                 shares = data.get("site_shares")
                 if isinstance(shares, dict):
                     for d in shares.keys():
-                        d_clean = d.lower().replace("https://", "").replace("http://", "").rstrip("/")
-                        if clean_domain == d_clean or clean_domain in d_clean or d_clean in clean_domain:
+                        if domains_match(domain, d):
                             return str(data.get("plan_id", file.stem))
             except Exception:
                 continue
@@ -478,40 +489,61 @@ $crawler_traffic = array(
 );
 $parent = dirname(rtrim(ABSPATH, "/"));
 $logs_dir = $parent . "/logs";
-if (is_dir($logs_dir) && function_exists("gzopen")) {
-    $log_files = glob($logs_dir . "/*.gz");
-    if (!empty($log_files)) {
-        sort($log_files);
-        $latest_log = end($log_files);
-        $zp = @gzopen($latest_log, "r");
-        if ($zp) {
-            $cnt = 0;
-            $bot_counts = array();
-            $facet_counts = array();
-            while (!gzeof($zp) && $cnt < 200) {
-                $line = gzgets($zp, 1024);
-                $cnt++;
-                if (!$line) break;
-                if (strpos($line, " MISS ") !== false) $crawler_traffic["cache_miss_count"]++;
-                if (strpos($line, " HIT ") !== false) $crawler_traffic["cache_hit_count"]++;
-                if (strpos($line, "doing_wp_cron=") !== false) $crawler_traffic["wp_cron_count"]++;
-                if (preg_match("/(Amazonbot|PetalBot|Googlebot|bingbot|SemrushBot|AhrefsBot|Bytespider|YandexBot)/i", $line, $bm)) {
-                    $bname = $bm[1];
-                    $bot_counts[$bname] = ($bot_counts[$bname] ?? 0) + 1;
+$lines = array();
+if (is_dir($logs_dir)) {
+    $plain_logs = glob($logs_dir . "/*.access.log");
+    if (!empty($plain_logs)) {
+        sort($plain_logs);
+        $latest_plain = end($plain_logs);
+        if (is_readable($latest_plain) && filesize($latest_plain) > 0) {
+            $fp = @fopen($latest_plain, "r");
+            if ($fp) {
+                while (!feof($fp) && count($lines) < 200) {
+                    $l = fgets($fp, 1024);
+                    if ($l !== false) $lines[] = $l;
                 }
-                if (preg_match("/\"GET\s+([^\s]*\?[^\s]+)/", $line, $qm)) {
-                    $qurl = substr($qm[1], 0, 80);
-                    $facet_counts[$qurl] = ($facet_counts[$qurl] ?? 0) + 1;
-                }
+                @fclose($fp);
             }
-            @gzclose($zp);
-            $crawler_traffic["sample_count"] = $cnt;
-            arsort($bot_counts);
-            arsort($facet_counts);
-            $crawler_traffic["top_bots"] = array_slice($bot_counts, 0, 5);
-            $crawler_traffic["top_facet_urls"] = array_slice($facet_counts, 0, 5);
         }
     }
+    if (empty($lines) && function_exists("gzopen")) {
+        $gz_files = glob($logs_dir . "/*.gz");
+        if (!empty($gz_files)) {
+            sort($gz_files);
+            $latest_gz = end($gz_files);
+            $zp = @gzopen($latest_gz, "r");
+            if ($zp) {
+                while (!gzeof($zp) && count($lines) < 200) {
+                    $l = gzgets($zp, 1024);
+                    if ($l !== false) $lines[] = $l;
+                }
+                @gzclose($zp);
+            }
+        }
+    }
+}
+if (!empty($lines)) {
+    $bot_counts = array();
+    $facet_counts = array();
+    $bot_pattern = "/(Amazonbot|PetalBot|Googlebot|bingbot|SemrushBot|AhrefsBot|Bytespider|YandexBot|ClaudeBot|GPTBot|facebookexternalhit|Twitterbot|MJ12bot|DotBot|DataForSeoBot|BLEXBot|Seekport)/i";
+    foreach ($lines as $line) {
+        if (preg_match("/\\bMISS\\b/", $line)) $crawler_traffic["cache_miss_count"]++;
+        if (preg_match("/\\bHIT\\b/", $line)) $crawler_traffic["cache_hit_count"]++;
+        if (strpos($line, "doing_wp_cron=") !== false) $crawler_traffic["wp_cron_count"]++;
+        if (preg_match($bot_pattern, $line, $bm)) {
+            $bname = $bm[1];
+            $bot_counts[$bname] = ($bot_counts[$bname] ?? 0) + 1;
+        }
+        if (preg_match("/\"GET\s+([^\s]*\?[^\s]+)/", $line, $qm)) {
+            $qurl = substr($qm[1], 0, 80);
+            $facet_counts[$qurl] = ($facet_counts[$qurl] ?? 0) + 1;
+        }
+    }
+    $crawler_traffic["sample_count"] = count($lines);
+    arsort($bot_counts);
+    arsort($facet_counts);
+    $crawler_traffic["top_bots"] = array_slice($bot_counts, 0, 5);
+    $crawler_traffic["top_facet_urls"] = array_slice($facet_counts, 0, 5);
 }
 
 return array(
@@ -547,21 +579,49 @@ def _analyze_site_findings(diagnosis: SiteDeepDiagnosis) -> list[DiagnosticFindi
     crawler = diagnosis.crawler_traffic
     if crawler:
         bots = crawler.get("top_bots", {})
+        facets = crawler.get("top_facet_urls", {})
         misses = crawler.get("cache_miss_count", 0)
         total_samples = crawler.get("sample_count", 0)
         wp_cron_hits = crawler.get("wp_cron_count", 0)
-        if bots or wp_cron_hits > 0 or (total_samples > 0 and misses / total_samples > 0.4):
-            bot_summary = ", ".join(f"{b}: {c} requests" for b, c in bots.items()) if bots else "aggressive scrapers"
+        has_miss_surge = total_samples > 0 and (misses / total_samples) > 0.4
+        if bots or wp_cron_hits > 0 or has_miss_surge:
+            miss_pct = (misses / max(1, total_samples)) * 100.0
+            if bots and facets:
+                bot_summary = ", ".join(f"{b}: {c} requests" for b, c in bots.items())
+                title = "Aggressive Bot Crawling & Facet Scrape Surge"
+                detail = (
+                    f"Automated crawlers ({bot_summary}) are querying combinatorial filter/facet URLs, generating "
+                    f"{misses} cache misses in a {total_samples}-request sample ({miss_pct:.1f}% miss rate) "
+                    f"and triggering {wp_cron_hits} direct/spawned wp-cron executions, causing massive CPU seconds consumption."
+                )
+            elif bots:
+                bot_summary = ", ".join(f"{b}: {c} requests" for b, c in bots.items())
+                title = "Aggressive Bot Crawling Traffic"
+                detail = (
+                    f"Automated crawlers ({bot_summary}) account for high request volume, generating "
+                    f"{misses} cache misses in a {total_samples}-request sample ({miss_pct:.1f}% miss rate) "
+                    f"and triggering {wp_cron_hits} wp-cron executions."
+                )
+            elif facets:
+                title = "Combinatorial Facet/Query Scrape Surge"
+                detail = (
+                    f"Un-cached requests are hitting query string/facet URLs ({len(facets)} distinct patterns), "
+                    f"generating {misses} cache misses in {total_samples} requests ({miss_pct:.1f}% miss rate) "
+                    f"and triggering {wp_cron_hits} wp-cron executions."
+                )
+            else:
+                title = "High Uncached Request & WP-Cron Trigger Volume"
+                detail = (
+                    f"Sampled traffic exhibits a high cache miss rate ({misses}/{total_samples}, {miss_pct:.1f}%) "
+                    f"and triggered {wp_cron_hits} direct/spawned wp-cron executions, accelerating program execution counts."
+                )
+
             findings.append(
                 DiagnosticFinding(
                     category="CRAWLER_SCRAPE_SURGE",
                     severity=QuotaSeverity.CRITICAL if (wp_cron_hits > 3 or misses > 30) else QuotaSeverity.WARNING,
-                    title="Aggressive Bot Crawling & Facet Scrape Surge",
-                    detail=(
-                        f"Automated crawlers ({bot_summary}) are querying combinatorial filter/facet URLs, generating "
-                        f"{misses} cache misses in a {total_samples}-request sample ({misses / max(1, total_samples) * 100:.1f}% miss rate) "
-                        f"and triggering {wp_cron_hits} direct/spawned wp-cron executions, causing massive CPU seconds consumption."
-                    ),
+                    title=title,
+                    detail=detail,
                     metric_value=crawler,
                 )
             )
@@ -860,6 +920,90 @@ def probe_site_deep(site: SiteConfig) -> SiteDeepDiagnosis:
             raw_op = stdout.read().decode("utf-8", errors="replace").strip()
             opcache_inodes = int(raw_op) if raw_op.isdigit() else 0
 
+            # 12. Top recurring cron hooks
+            cmd_cron_hooks = (
+                f"cd {site.remote_path} && wp eval "
+                "'$c = get_option(\"cron\"); $h = array(); if(is_array($c)){foreach($c as $hooks){if(is_array($hooks)){foreach($hooks as $k=>$v){$h[$k]=($h[$k]??0)+count($v);}}}} arsort($h); echo json_encode(array_slice($h, 0, 10));' "
+                "--format=json 2>/dev/null || echo '{}'"
+            )
+            _, stdout, _ = client.exec_command(cmd_cron_hooks, timeout=15)
+            raw_hooks = stdout.read().decode("utf-8", errors="replace").strip()
+            top_cron_hooks: dict[str, int] = {}
+            try:
+                parsed_h = json.loads(raw_hooks)
+                if isinstance(parsed_h, dict):
+                    top_cron_hooks = {str(k): int(v) for k, v in parsed_h.items()}
+            except Exception:
+                pass
+
+            # 13. Heartbeat settings
+            cmd_heartbeat = (
+                f"cd {site.remote_path} && wp eval "
+                "'$o = class_exists(\"SiteGround_Optimizer\\\\Options\\\\Options\") ? (new \\SiteGround_Optimizer\\Options\\Options())->fetch_options() : array(); echo json_encode(array(\"post_interval\"=>(int)($o[\"heartbeat_post_interval\"]??0), \"dashboard_interval\"=>(int)($o[\"heartbeat_dashboard_interval\"]??0), \"frontend_interval\"=>(int)($o[\"heartbeat_frontend_interval\"]??0)));' "
+                "--format=json 2>/dev/null || echo '{}'"
+            )
+            _, stdout, _ = client.exec_command(cmd_heartbeat, timeout=15)
+            raw_hb = stdout.read().decode("utf-8", errors="replace").strip()
+            heartbeat_settings: dict[str, int] = {}
+            try:
+                parsed_hb = json.loads(raw_hb)
+                if isinstance(parsed_hb, dict):
+                    heartbeat_settings = {str(k): int(v) for k, v in parsed_hb.items()}
+            except Exception:
+                pass
+
+            # 14. Crawler traffic sample from access log
+            crawler_traffic: dict[str, Any] = {
+                "sample_count": 0,
+                "cache_miss_count": 0,
+                "cache_hit_count": 0,
+                "wp_cron_count": 0,
+                "top_bots": {},
+                "top_facet_urls": {},
+            }
+            cmd_log = (
+                f"logs_dir=\"~/www/{primary_host}/logs\"; "
+                "if [ -d \"$logs_dir\" ]; then "
+                "  plain=$(ls -t \"$logs_dir\"/*.access.log 2>/dev/null | head -1); "
+                "  if [ -n \"$plain\" ] && [ -s \"$plain\" ]; then head -200 \"$plain\"; "
+                "  else gz=$(ls -t \"$logs_dir\"/*.gz 2>/dev/null | head -1); "
+                "    if [ -n \"$gz\" ]; then zcat \"$gz\" 2>/dev/null | head -200; fi; "
+                "  fi; "
+                "fi"
+            )
+            _, stdout, _ = client.exec_command(cmd_log, timeout=15)
+            log_output = stdout.read().decode("utf-8", errors="replace")
+            log_lines = [l for l in log_output.splitlines() if l.strip()]
+            if log_lines:
+                crawler_traffic["sample_count"] = len(log_lines)
+                bot_counts: dict[str, int] = {}
+                facet_counts: dict[str, int] = {}
+                bot_re = re.compile(
+                    r"(Amazonbot|PetalBot|Googlebot|bingbot|SemrushBot|AhrefsBot|Bytespider|YandexBot|"
+                    r"ClaudeBot|GPTBot|facebookexternalhit|Twitterbot|MJ12bot|DotBot|DataForSeoBot|BLEXBot|Seekport)",
+                    re.IGNORECASE,
+                )
+                facet_re = re.compile(r'"GET\s+([^\s]*\?[^\s]+)')
+                miss_re = re.compile(r"\bMISS\b")
+                hit_re = re.compile(r"\bHIT\b")
+                for l in log_lines:
+                    if miss_re.search(l):
+                        crawler_traffic["cache_miss_count"] += 1
+                    if hit_re.search(l):
+                        crawler_traffic["cache_hit_count"] += 1
+                    if "doing_wp_cron=" in l:
+                        crawler_traffic["wp_cron_count"] += 1
+                    bm = bot_re.search(l)
+                    if bm:
+                        bname = bm.group(1)
+                        bot_counts[bname] = bot_counts.get(bname, 0) + 1
+                    fm = facet_re.search(l)
+                    if fm:
+                        qurl = fm.group(1)[:80]
+                        facet_counts[qurl] = facet_counts.get(qurl, 0) + 1
+                crawler_traffic["top_bots"] = dict(sorted(bot_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+                crawler_traffic["top_facet_urls"] = dict(sorted(facet_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+
             diagnosis = SiteDeepDiagnosis(
                 site_id=site.site_id,
                 home_url=site.public_url,
@@ -875,10 +1019,10 @@ def probe_site_deep(site: SiteConfig) -> SiteDeepDiagnosis:
                 transients_count=transients_count,
                 active_plugins_count=active_plugins_count,
                 plugin_inode_counts=plugin_inode_counts,
-                top_cron_hooks={},
+                top_cron_hooks=top_cron_hooks,
                 xmlrpc_enabled=xmlrpc_enabled,
-                heartbeat_settings={},
-                crawler_traffic={},
+                heartbeat_settings=heartbeat_settings,
+                crawler_traffic=crawler_traffic,
                 opcache_inodes=opcache_inodes,
             )
             diagnosis.findings = _analyze_site_findings(diagnosis)
@@ -887,6 +1031,150 @@ def probe_site_deep(site: SiteConfig) -> SiteDeepDiagnosis:
             client.close()
 
     raise RunnerError(f"Unsupported adapter {site.adapter!r} for deep quota diagnosis.")
+
+
+ALLOWED_CLEANUP_TARGETS = frozenset({
+    "upgrade-temp-backup",
+    "wp-staging",
+    "cache",
+})
+
+
+def clean_site_inodes(
+    site: SiteConfig,
+    target_dir: str,
+    *,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    if target_dir not in ALLOWED_CLEANUP_TARGETS:
+        raise ValueError(
+            f"Target directory {target_dir!r} is not an allowed cleanup target. "
+            f"Allowed targets: {sorted(ALLOWED_CLEANUP_TARGETS)}"
+        )
+
+    if site.adapter == "novamira_mcp":
+        runner = build_novamira_runner(site)
+        target_sub_json = json.dumps(target_dir)
+        dry_run_val = "true" if dry_run else "false"
+        php = f"""
+$target_sub = {target_sub_json};
+$dry_run = {dry_run_val};
+$dir = WP_CONTENT_DIR . '/' . $target_sub;
+$file_count = 0;
+$bytes_count = 0;
+$deleted_files = 0;
+$deleted_dirs = 0;
+$errors = array();
+
+if (is_dir($dir)) {{
+    try {{
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $item) {{
+            $file_count++;
+            $size = 0;
+            try {{ $size = $item->getSize(); }} catch (Exception $e) {{}}
+            $bytes_count += $size;
+            if (!$dry_run) {{
+                if ($item->isDir()) {{
+                    if (!@rmdir($item->getRealPath())) {{
+                        $errors[] = "Failed rmdir: " . $item->getFilename();
+                    }} else {{
+                        $deleted_dirs++;
+                    }}
+                }} else {{
+                    if (!@unlink($item->getRealPath())) {{
+                        $errors[] = "Failed unlink: " . $item->getFilename();
+                    }} else {{
+                        $deleted_files++;
+                    }}
+                }}
+            }}
+        }}
+    }} catch (Exception $e) {{
+        $errors[] = $e->getMessage();
+    }}
+}}
+
+return array(
+    "home_url" => home_url(),
+    "target_dir" => $target_sub,
+    "path" => "wp-content/" . $target_sub,
+    "dry_run" => (bool) $dry_run,
+    "observed_files" => $file_count,
+    "observed_bytes" => $bytes_count,
+    "deleted_files" => $deleted_files,
+    "deleted_dirs" => $deleted_dirs,
+    "errors" => array_slice($errors, 0, 10),
+);
+""".strip()
+        data = runner._execute_php(php)
+        return {
+            "site_id": site.site_id,
+            "home_url": data.get("home_url", site.public_url),
+            "target_dir": target_dir,
+            "path": f"wp-content/{target_dir}",
+            "dry_run": dry_run,
+            "observed_files": int(data.get("observed_files", 0)),
+            "observed_bytes": int(data.get("observed_bytes", 0)),
+            "deleted_files": int(data.get("deleted_files", 0)),
+            "deleted_dirs": int(data.get("deleted_dirs", 0)),
+            "errors": data.get("errors", []),
+            "transport": "novamira",
+        }
+
+    if site.adapter == "paramiko_wpcli":
+        runner = build_runner(site)
+        client = runner._connect()
+        try:
+            rel_path = f"wp-content/{target_dir}"
+            check_cmd = (
+                f"cd {site.remote_path} && if [ -d '{rel_path}' ]; then "
+                f"find '{rel_path}' -mindepth 1 | wc -l; else echo 0; fi"
+            )
+            _, stdout, _ = client.exec_command(check_cmd, timeout=30)
+            raw_cnt = stdout.read().decode("utf-8", errors="replace").strip()
+            observed_files = int(raw_cnt) if raw_cnt.isdigit() else 0
+
+            bytes_cmd = (
+                f"cd {site.remote_path} && if [ -d '{rel_path}' ]; then "
+                f"du -sk '{rel_path}' 2>/dev/null | cut -f1; else echo 0; fi"
+            )
+            _, stdout, _ = client.exec_command(bytes_cmd, timeout=15)
+            raw_kb = stdout.read().decode("utf-8", errors="replace").strip()
+            observed_bytes = int(raw_kb) * 1024 if raw_kb.isdigit() else 0
+
+            deleted_files = 0
+            if not dry_run and observed_files > 0:
+                del_cmd = (
+                    f"cd {site.remote_path} && if [ -d '{rel_path}' ]; then "
+                    f"(find '{rel_path}' -mindepth 1 -delete 2>/dev/null || rm -rf '{rel_path}'/*) && "
+                    f"find '{rel_path}' -mindepth 1 | wc -l; else echo 0; fi"
+                )
+                _, stdout, _ = client.exec_command(del_cmd, timeout=45)
+                raw_rem = stdout.read().decode("utf-8", errors="replace").strip()
+                rem = int(raw_rem) if raw_rem.isdigit() else 0
+                deleted_files = max(0, observed_files - rem)
+
+            return {
+                "site_id": site.site_id,
+                "home_url": site.public_url,
+                "target_dir": target_dir,
+                "path": rel_path,
+                "dry_run": dry_run,
+                "observed_files": observed_files,
+                "observed_bytes": observed_bytes,
+                "deleted_files": deleted_files,
+                "deleted_dirs": 0,
+                "errors": [],
+                "transport": "ssh",
+            }
+        finally:
+            client.close()
+
+    raise RunnerError(f"Unsupported adapter {site.adapter!r} for inode cleanup.")
 
 
 @dataclass(frozen=True)
@@ -965,6 +1253,33 @@ class QuotaTriageEngine:
         overall_sev = snapshot.overall_severity
         action_needed = overall_sev in (QuotaSeverity.CRITICAL, QuotaSeverity.EXHAUSTED)
 
+        # 0. Plan-Level Site Share Analysis (detecting heavy unprobed sites)
+        diagnosed_hosts = [
+            diag.home_url for diag in site_diagnoses
+        ]
+        for site_share in snapshot.top_sites_by_inodes():
+            is_diagnosed = any(
+                domains_match(site_share.domain, dh)
+                for dh in diagnosed_hosts
+            )
+            pct = site_share.inodes_percent_of_plan(snapshot.inodes_limit)
+            if site_share.inodes_count > 50_000 and not is_diagnosed:
+                culprits.append(
+                    CulpritFinding(
+                        category="INODES_SITE_SHARE",
+                        severity=QuotaSeverity.CRITICAL if site_share.inodes_count > 100_000 else QuotaSeverity.WARNING,
+                        site_id=site_share.domain,
+                        impact_summary=(
+                            f"Domain '{site_share.domain}' consumes {site_share.inodes_count:,} inodes "
+                            f"({pct:.1f}% of plan limit) on hosting plan."
+                        ),
+                        technical_details=(
+                            f"Web space: {site_share.web_space_gb:.2f} GB. In-site deep diagnosis was not performed "
+                            "for this domain (ensure site profile is configured in sites.json)."
+                        ),
+                    )
+                )
+
         # 1. Analyze Inode Culprits
         for diag in site_diagnoses:
             # Check Sibling Staging Sites (e.g. staging2.example.com)
@@ -1009,7 +1324,10 @@ class QuotaTriageEngine:
                         target=diag.site_id,
                         category="INODES_RECLAMATION",
                         action_type="automated",
-                        command_hint=f"siteground-ops cache-purge {diag.site_id} (or rm -rf wp-content/wp-staging/*)",
+                        command_hint=(
+                            f"siteground-ops quota clean {diag.site_id} --target-dir wp-staging "
+                            f"--confirm-target {diag.site_id} --recovery-receipt <receipt>"
+                        ),
                         description=f"Purge stale staging copy files in {diag.site_id} to reclaim {wp_staging_cnt:,} inodes.",
                         estimated_inode_savings=wp_staging_cnt,
                     )
@@ -1033,7 +1351,10 @@ class QuotaTriageEngine:
                         target=diag.site_id,
                         category="INODES_RECLAMATION",
                         action_type="automated",
-                        command_hint=f"rm -rf wp-content/upgrade-temp-backup/*",
+                        command_hint=(
+                            f"siteground-ops quota clean {diag.site_id} --target-dir upgrade-temp-backup "
+                            f"--confirm-target {diag.site_id} --recovery-receipt <receipt>"
+                        ),
                         description=f"Clear abandoned temporary upgrade backups in {diag.site_id} ({upgrade_cnt:,} inodes).",
                         estimated_inode_savings=upgrade_cnt,
                     )

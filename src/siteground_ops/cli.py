@@ -28,6 +28,7 @@ from .quota import (
     DEFAULT_HOURLY_EXECUTION_LIMIT,
     DEFAULT_INODES_LIMIT,
     DEFAULT_WEB_SPACE_GB_LIMIT,
+    ALLOWED_CLEANUP_TARGETS,
     PlanQuotaSnapshot,
     QuotaMetric,
     QuotaSeverity,
@@ -35,6 +36,8 @@ from .quota import (
     QuotaTriageEngine,
     SiteDeepDiagnosis,
     SiteQuotaShare,
+    clean_site_inodes,
+    domains_match,
     probe_site_deep,
 )
 from .receipts import receipt
@@ -123,6 +126,18 @@ def parser() -> argparse.ArgumentParser:
     quota_triage.add_argument("target")
     quota_triage.add_argument("--plan", dest="plan_id", help="Exact hosting plan id to triage against")
     quota_triage.add_argument("--telemetry", type=Path)
+
+    quota_clean = quota_commands.add_parser("clean")
+    quota_clean.add_argument("target", help="Site identifier to clean inodes on")
+    quota_clean.add_argument(
+        "--target-dir",
+        required=True,
+        choices=sorted(ALLOWED_CLEANUP_TARGETS),
+        help="Subdirectory inside wp-content to purge",
+    )
+    quota_clean.add_argument("--dry-run", action="store_true", default=False, help="Inspect without deleting files")
+    quota_clean.add_argument("--confirm-target", help="Must match target site id for non-dry-run mutation")
+    quota_clean.add_argument("--recovery-receipt", help="Operator rationale/audit receipt required for non-dry-run mutation")
 
     quota_record = quota_commands.add_parser("record")
     quota_record.add_argument("--plan", dest="plan_id", required=True)
@@ -844,10 +859,12 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
         if not plan_id:
             plan_id = target
 
+        # 1. Match sites explicitly pinned with portal_plan_id
         for s in config.sites.values():
             if s.portal_plan_id == plan_id and s not in sites_to_probe:
                 sites_to_probe.append(s)
 
+        # 2. Load snapshot from telemetry
         snapshot = store.load_snapshot(plan_id)
         if args.telemetry:
             try:
@@ -856,10 +873,11 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
             except Exception:
                 pass
 
-        if snapshot and not sites_to_probe:
+        # 3. Match any configured site whose domain is in snapshot.site_shares
+        if snapshot:
             for domain in snapshot.site_shares:
                 for s in config.sites.values():
-                    if domain in s.public_url and s not in sites_to_probe:
+                    if domains_match(domain, s.public_url) and s not in sites_to_probe:
                         sites_to_probe.append(s)
 
         if not sites_to_probe and target in config.sites:
@@ -902,6 +920,75 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
         )
         return 0
 
+    if action == "clean":
+        target = args.target
+        site = _site(config, target, "quota-clean", request_id)
+        if site is None:
+            return 2
+
+        is_dry_run = getattr(args, "dry_run", False)
+        if not is_dry_run:
+            if args.confirm_target != site.site_id or not args.recovery_receipt:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-clean",
+                        target=site.site_id,
+                        mutation_state="refused",
+                        request_id=request_id,
+                        safe_next_action=(
+                            f"Retry with --confirm-target {site.site_id} and --recovery-receipt <receipt>."
+                        ),
+                        diagnostics={"code": "mutation_confirmation_required"},
+                    )
+                )
+                return 2
+
+        try:
+            res = clean_site_inodes(site, args.target_dir, dry_run=is_dry_run)
+        except ValueError as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="quota-clean",
+                    target=site.site_id,
+                    mutation_state="refused",
+                    request_id=request_id,
+                    safe_next_action=f"Select an allowed cleanup target: {sorted(ALLOWED_CLEANUP_TARGETS)}",
+                    diagnostics={"code": "forbidden_cleanup_target", "message": str(exc)},
+                )
+            )
+            return 2
+        except Exception as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="quota-clean",
+                    target=site.site_id,
+                    mutation_state="unknown" if not is_dry_run else "not_applicable",
+                    request_id=request_id,
+                    safe_next_action="Inspect site filesystem and read back status before retrying.",
+                    diagnostics={"code": "cleanup_failed", "message": str(exc)},
+                )
+            )
+            return 1 if is_dry_run else 3
+
+        evidence = dict(res)
+        if not is_dry_run:
+            evidence["recovery_receipt"] = args.recovery_receipt
+
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-clean",
+                target=site.site_id,
+                mutation_state="not_applicable" if is_dry_run else "applied",
+                request_id=request_id,
+                evidence=evidence,
+            )
+        )
+        return 0
+
     emit(
         receipt(
             ok=False,
@@ -909,7 +996,7 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
             target=None,
             mutation_state="not_applicable",
             request_id=request_id,
-            safe_next_action="Specify a valid quota action: check, diagnose, triage, record.",
+            safe_next_action="Specify a valid quota action: check, diagnose, triage, clean, record.",
             diagnostics={"code": "invalid_quota_action"},
         )
     )

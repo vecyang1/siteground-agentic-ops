@@ -26,6 +26,7 @@ siteground-ops cache-purge <site-id> [--transport auto|ssh|novamira] --confirm-t
 siteground-ops quota check [--plan <plan-id>]
 siteground-ops quota diagnose <site-id> [--transport auto|ssh|novamira]
 siteground-ops quota triage <site-id|plan-id> [--plan <plan-id>]
+siteground-ops quota clean <site-id> --target-dir <dir> [--dry-run]
 siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-peak <hourly-peak> [--cpu-alert]
 siteground-ops wp-admin <site-id-or-domain> [--app <id>] [--foreground]
 siteground-ops portal read <account> wp-apps
@@ -47,6 +48,7 @@ SiteGround shared hosting plans impose strict plan-level resource caps (e.g. 600
   - `INODES_RECLAMATION`: Safe commands to prune abandoned `upgrade-temp-backup` directories and clean stale transients.
   - `CRON_STABILIZATION`: Transition from synchronous visitor-triggered virtual cron to system crontab (`DISABLE_WP_CRON = true`).
   - `SECURITY_HARDENING`: Disable unauthenticated XML-RPC endpoint.
+- `quota clean <site-id> --target-dir {cache,upgrade-temp-backup,wp-staging} [--dry-run]`: Safe closed-loop remediation for inode bloat. Supports `--dry-run` inspection, strictly confines deletions to safe subdirectories, and fails closed without `--confirm-target` and `--recovery-receipt`. Works across both Novamira MCP and SSH.
 - `quota record --plan <plan-id> ...`: Records manual or OpenCLI-parsed portal telemetry into the local state store (`~/.config/siteground-ops/quota_telemetry/<plan-id>.json`).
 
 ## WordPress admin sign-in

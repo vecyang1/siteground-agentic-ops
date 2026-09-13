@@ -694,3 +694,432 @@ def test_cli_quota_triage_explicit_plan_flag(
     assert triage_rec["evidence"]["plan_id"] == "EXPLICIT_PLAN_999"
 
 
+def test_clean_site_inodes_forbidden_target(tmp_path: Path) -> None:
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.quota import clean_site_inodes
+
+    site = SiteConfig(
+        site_id="test-site",
+        label="Test Site",
+        public_url="https://test.example.com",
+        environment="staging",
+        adapter="novamira_mcp",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+    )
+    with pytest.raises(ValueError, match="not an allowed cleanup target"):
+        clean_site_inodes(site, "plugins", dry_run=True)
+
+    with pytest.raises(ValueError, match="not an allowed cleanup target"):
+        clean_site_inodes(site, "../../etc", dry_run=True)
+
+
+def test_clean_site_inodes_novamira_dry_run_and_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.quota import clean_site_inodes
+
+    site = SiteConfig(
+        site_id="test-site",
+        label="Test Site",
+        public_url="https://test.example.com",
+        environment="staging",
+        adapter="novamira_mcp",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+    )
+
+    class MockNovamiraRunner:
+        def _execute_php(self, code: str) -> dict[str, Any]:
+            assert "WP_CONTENT_DIR" in code
+            if "$dry_run = true;" in code:
+                return {
+                    "home_url": "https://test.example.com",
+                    "target_dir": "upgrade-temp-backup",
+                    "path": "wp-content/upgrade-temp-backup",
+                    "dry_run": True,
+                    "observed_files": 15000,
+                    "observed_bytes": 100000000,
+                    "deleted_files": 0,
+                    "deleted_dirs": 0,
+                    "errors": [],
+                }
+            return {
+                "home_url": "https://test.example.com",
+                "target_dir": "upgrade-temp-backup",
+                "path": "wp-content/upgrade-temp-backup",
+                "dry_run": False,
+                "observed_files": 15000,
+                "observed_bytes": 100000000,
+                "deleted_files": 15000,
+                "deleted_dirs": 120,
+                "errors": [],
+            }
+
+    monkeypatch.setattr("siteground_ops.quota.build_novamira_runner", lambda _s: MockNovamiraRunner())
+
+    dry_res = clean_site_inodes(site, "upgrade-temp-backup", dry_run=True)
+    assert dry_res["dry_run"] is True
+    assert dry_res["observed_files"] == 15000
+    assert dry_res["deleted_files"] == 0
+
+    exec_res = clean_site_inodes(site, "upgrade-temp-backup", dry_run=False)
+    assert exec_res["dry_run"] is False
+    assert exec_res["deleted_files"] == 15000
+
+
+def test_clean_site_inodes_ssh_dry_run_and_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.quota import clean_site_inodes
+
+    site = SiteConfig(
+        site_id="ssh-clean-site",
+        label="SSH Clean Site",
+        public_url="https://ssh.example.com",
+        environment="production",
+        adapter="paramiko_wpcli",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+        remote_path="/home/customer/www/ssh.example.com/public_html",
+    )
+
+    class MockChannel:
+        def __init__(self, output: str) -> None:
+            self._data = io.BytesIO(output.encode("utf-8"))
+
+        def read(self) -> bytes:
+            return self._data.read()
+
+    class MockSSHClient:
+        def exec_command(self, cmd: str, timeout: int = 15):
+            out = "0"
+            if "delete" in cmd or "rm -rf" in cmd:
+                # after deletion, 0 files remain
+                out = "0"
+            elif "find 'wp-content/upgrade-temp-backup' -mindepth 1 | wc -l" in cmd:
+                out = "4200"
+            elif "du -sk" in cmd:
+                out = "65000"
+            return None, MockChannel(out), MockChannel("")
+
+        def close(self) -> None:
+            pass
+
+    class MockRunner:
+        def _connect(self):
+            return MockSSHClient()
+
+    monkeypatch.setattr("siteground_ops.quota.build_runner", lambda _s: MockRunner())
+
+    dry_res = clean_site_inodes(site, "upgrade-temp-backup", dry_run=True)
+    assert dry_res["transport"] == "ssh"
+    assert dry_res["dry_run"] is True
+    assert dry_res["observed_files"] == 4200
+    assert dry_res["deleted_files"] == 0
+
+    exec_res = clean_site_inodes(site, "upgrade-temp-backup", dry_run=False)
+    assert exec_res["transport"] == "ssh"
+    assert exec_res["dry_run"] is False
+    assert exec_res["observed_files"] == 4200
+    assert exec_res["deleted_files"] == 4200
+
+
+def test_cli_quota_clean_confirmation_guard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from siteground_ops.cli import main
+
+    cfg_file = write_test_config(tmp_path)
+    # Missing confirmation
+    code = main([
+        "--config", str(cfg_file),
+        "quota", "clean",
+        "test-site",
+        "--target-dir", "upgrade-temp-backup",
+    ])
+    assert code == 2
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["ok"] is False
+    assert rec["mutation_state"] == "refused"
+    assert rec["diagnostics"]["code"] == "mutation_confirmation_required"
+
+
+def test_cli_quota_clean_dry_run_and_execution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from siteground_ops.cli import main
+
+    cfg_file = write_test_config(tmp_path)
+
+    def mock_clean(_site, target_dir, dry_run=True):
+        return {
+            "site_id": _site.site_id,
+            "home_url": _site.public_url,
+            "target_dir": target_dir,
+            "path": f"wp-content/{target_dir}",
+            "dry_run": dry_run,
+            "observed_files": 19526,
+            "observed_bytes": 210000000,
+            "deleted_files": 0 if dry_run else 19526,
+            "deleted_dirs": 0 if dry_run else 100,
+            "errors": [],
+            "transport": "novamira",
+        }
+
+    monkeypatch.setattr("siteground_ops.cli.clean_site_inodes", mock_clean)
+
+    # 1. Dry run
+    code = main([
+        "--config", str(cfg_file),
+        "quota", "clean",
+        "test-site",
+        "--target-dir", "upgrade-temp-backup",
+        "--dry-run",
+    ])
+    assert code == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["ok"] is True
+    assert rec["mutation_state"] == "not_applicable"
+    assert rec["evidence"]["dry_run"] is True
+    assert rec["evidence"]["observed_files"] == 19526
+
+    # 2. Execution with confirmation
+    code = main([
+        "--config", str(cfg_file),
+        "quota", "clean",
+        "test-site",
+        "--target-dir", "upgrade-temp-backup",
+        "--confirm-target", "test-site",
+        "--recovery-receipt", "operator-approved-test-cleanup",
+    ])
+    assert code == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["ok"] is True
+    assert rec["mutation_state"] == "applied"
+    assert rec["evidence"]["deleted_files"] == 19526
+    assert rec["evidence"]["recovery_receipt"] == "operator-approved-test-cleanup"
+
+
+def test_quota_triage_detects_unprobed_heavy_site_share() -> None:
+    from siteground_ops.quota import (
+        PlanQuotaSnapshot,
+        QuotaSeverity,
+        QuotaTriageEngine,
+        SiteDeepDiagnosis,
+        SiteQuotaShare,
+    )
+
+    snap = PlanQuotaSnapshot(
+        plan_id="PLAN_MULTI",
+        plan_name="GoGeek",
+        observed_at="2026-09-13T23:00:00Z",
+        inodes_used=540000,
+        inodes_limit=600000,
+        site_shares={
+            "probed.example.com": SiteQuotaShare("probed.example.com", 4.0, 110000),
+            "heavy-unprobed.example.com": SiteQuotaShare("heavy-unprobed.example.com", 10.0, 250000),
+        },
+    )
+
+    diag = SiteDeepDiagnosis(
+        site_id="probed-site",
+        home_url="https://probed.example.com",
+        transport="novamira",
+        inode_counts={"plugins": 50000, "upgrade-temp-backup": 15000},
+    )
+
+    engine = QuotaTriageEngine()
+    report = engine.triage(snap, [diag])
+
+    culprit_categories = [c.category for c in report.top_culprits]
+    assert "INODES_SITE_SHARE" in culprit_categories
+    heavy_culprit = next(c for c in report.top_culprits if c.category == "INODES_SITE_SHARE")
+    assert heavy_culprit.site_id == "heavy-unprobed.example.com"
+    assert "250,000 inodes" in heavy_culprit.impact_summary
+    assert heavy_culprit.severity == QuotaSeverity.CRITICAL
+
+
+def test_domains_match_accuracy() -> None:
+    from siteground_ops.quota import domains_match
+
+    assert domains_match("example.com", "example.com") is True
+    assert domains_match("https://example.com/", "http://example.com") is True
+    assert domains_match("staging.example.com", "example.com") is True
+    assert domains_match("example.com", "staging.example.com") is True
+    assert domains_match("probed.example.com", "heavy-unprobed.example.com") is False
+    assert domains_match("alpha.example.com", "beta.example.com") is False
+    assert domains_match("", "example.com") is False
+
+
+def test_cli_quota_triage_expands_to_all_plan_sites(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from siteground_ops.cli import main
+
+    cfg_data = {
+        "schema_version": 2,
+        "portal_accounts": {
+            "primary-siteground": {
+                "label": "Test Portal Account",
+                "adapter": "opencli",
+                "opencli_path": "/path/to/opencli",
+                "opencli_profile": "5angnuvf",
+                "credential_pointer": "pointer",
+                "expected_domains": ["site-a.example.com", "site-b.example.com"],
+            }
+        },
+        "sites": {
+            "site-a": {
+                "adapter": "novamira_mcp",
+                "novamira_server": "novamira-a",
+                "environment": "production",
+                "label": "Site A",
+                "public_url": "https://site-a.example.com",
+                "credential_pointer": "pointer",
+                "recovery_pointer": "recovery",
+                "portal_plan_id": "SHARED_PLAN_1",
+            },
+            "site-b": {
+                "adapter": "novamira_mcp",
+                "novamira_server": "novamira-b",
+                "environment": "production",
+                "label": "Site B",
+                "public_url": "https://site-b.example.com",
+                "credential_pointer": "pointer",
+                "recovery_pointer": "recovery",
+                # Note: portal_plan_id not set on site-b, but present in snapshot
+            },
+        },
+    }
+    cfg_file = tmp_path / "sites.json"
+    cfg_file.write_text(json.dumps(cfg_data), encoding="utf-8")
+
+    store_dir = tmp_path / "quota_telemetry"
+    monkeypatch.setattr("siteground_ops.quota.DEFAULT_QUOTA_STORE_DIR", store_dir)
+
+    snap = PlanQuotaSnapshot(
+        plan_id="SHARED_PLAN_1",
+        plan_name="Shared Plan",
+        observed_at="2026-09-13T23:00:00Z",
+        inodes_used=400000,
+        inodes_limit=600000,
+        site_shares={
+            "site-a.example.com": SiteQuotaShare("site-a.example.com", 3.0, 100000),
+            "site-b.example.com": SiteQuotaShare("site-b.example.com", 8.0, 200000),
+        },
+    )
+    QuotaStore(directory=store_dir).save_snapshot(snap)
+
+    probed_sites: list[str] = []
+
+    def mock_probe(site):
+        probed_sites.append(site.site_id)
+        return SiteDeepDiagnosis(
+            site_id=site.site_id,
+            home_url=site.public_url,
+            transport="novamira",
+            inode_counts={"plugins": 10000},
+        )
+
+    monkeypatch.setattr("siteground_ops.cli.probe_site_deep", mock_probe)
+
+    # Calling triage for site-a should probe BOTH site-a AND site-b
+    code = main([
+        "--config", str(cfg_file),
+        "quota", "triage",
+        "site-a",
+    ])
+    assert code == 0
+    triage_rec = json.loads(capsys.readouterr().out)
+    assert triage_rec["ok"] is True
+    assert "site-a" in probed_sites
+    assert "site-b" in probed_sites
+    assert len(triage_rec["evidence"]["site_diagnostics"]) == 2
+
+
+def test_probe_site_deep_ssh_telemetry_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.quota import probe_site_deep
+
+    site = SiteConfig(
+        site_id="ssh-test-site",
+        label="SSH Test Site",
+        public_url="https://ssh.example.com",
+        environment="production",
+        adapter="paramiko_wpcli",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+        remote_path="/home/customer/www/ssh.example.com/public_html",
+    )
+
+    class MockChannel:
+        def __init__(self, output: str) -> None:
+            self._data = io.BytesIO(output.encode("utf-8"))
+
+        def read(self) -> bytes:
+            return self._data.read()
+
+    class MockSSHClient:
+        def exec_command(self, cmd: str, timeout: int = 15):
+            out = ""
+            if "DISABLE_WP_CRON" in cmd:
+                out = "false"
+            elif "count((array) get_option" in cmd:
+                out = "42"
+            elif "arsort($h)" in cmd:
+                out = json.dumps({"action_scheduler_run_queue": 15, "wp_scheduled_delete": 2})
+            elif "heartbeat" in cmd:
+                out = json.dumps({"post_interval": 120, "dashboard_interval": 60, "frontend_interval": 60})
+            elif "logs_dir" in cmd:
+                out = (
+                    '127.0.0.1 - - [13/Sep/2026:10:00:00 +0000] "GET /shop/?filter=1 HTTP/1.1" 200 1200 "-" "Mozilla/5.0 (compatible; Amazonbot/0.1)" MISS\n'
+                    '127.0.0.1 - - [13/Sep/2026:10:00:01 +0000] "POST /wp-cron.php?doing_wp_cron=123 HTTP/1.1" 200 0 "-" "-" MISS\n'
+                    '127.0.0.1 - - [13/Sep/2026:10:00:02 +0000] "GET /about HTTP/1.1" 200 5000 "-" "Mozilla/5.0" HIT\n'
+                )
+            elif "xmlrpc_enabled" in cmd:
+                out = "1"
+            elif "autoload" in cmd:
+                out = "100"
+            elif "transient" in cmd:
+                out = "5"
+            elif "plugin list" in cmd:
+                out = "10"
+            elif "wp-content/plugins/*" in cmd:
+                out = "woocommerce:5000\nsurecart:8000\n"
+            elif "wp-content/*" in cmd:
+                out = "wp-content/plugins:13000\nwp-content/upgrade-temp-backup:5000\n"
+            elif "staging" in cmd:
+                out = ""
+            elif "opcache" in cmd:
+                out = "3500"
+            return None, MockChannel(out), MockChannel("")
+
+        def close(self) -> None:
+            pass
+
+    class MockRunner:
+        def _connect(self):
+            return MockSSHClient()
+
+    monkeypatch.setattr("siteground_ops.quota.build_runner", lambda _s: MockRunner())
+    monkeypatch.setattr("siteground_ops.quota.probe_public_cache_headers", lambda _u: {"x_proxy_cache": "HIT"})
+
+    diag = probe_site_deep(site)
+    assert diag.transport == "ssh"
+    assert diag.virtual_cron_enabled is True
+    assert diag.top_cron_hooks == {"action_scheduler_run_queue": 15, "wp_scheduled_delete": 2}
+    assert diag.heartbeat_settings.get("post_interval") == 120
+    assert diag.crawler_traffic["sample_count"] == 3
+    assert diag.crawler_traffic["cache_miss_count"] == 2
+    assert diag.crawler_traffic["cache_hit_count"] == 1
+    assert diag.crawler_traffic["wp_cron_count"] == 1
+    assert "Amazonbot" in diag.crawler_traffic["top_bots"]
+
+
