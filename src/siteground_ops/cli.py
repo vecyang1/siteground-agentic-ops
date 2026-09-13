@@ -40,6 +40,23 @@ from .quota import (
     domains_match,
     probe_site_deep,
 )
+from .quota_intake import (
+    QuotaAlertRecord,
+    match_alert_to_config,
+    parse_siteground_alert_email,
+    scan_json_messages,
+    scan_mail_threads,
+)
+from .quota_ledger import (
+    get_ledger_db_path,
+    get_quota_alert_by_id,
+    get_quota_alerts,
+    get_remediation_records,
+    get_triage_snapshots,
+    record_quota_alert,
+    record_remediation,
+    record_triage_snapshot,
+)
 from .receipts import receipt
 from .runner import (
     RunnerError,
@@ -151,6 +168,22 @@ def parser() -> argparse.ArgumentParser:
     quota_record.add_argument("--cpu-alert", action="store_true")
     quota_record.add_argument("--data", help="Raw JSON snapshot string")
     quota_record.add_argument("--file", type=Path, help="Path to JSON snapshot file")
+
+    quota_intake = quota_commands.add_parser("intake")
+    quota_intake.add_argument("--since-days", type=int, default=30, help="Scan emails received within last N days")
+    quota_intake.add_argument("--limit", type=int, default=50, help="Maximum emails to inspect")
+    quota_intake.add_argument("--mail-db", type=Path, help="Explicit path to Mail.app Envelope Index database")
+    quota_intake.add_argument("--file", type=Path, help="JSON file containing raw email dictionaries to parse")
+    quota_intake.add_argument("--auto-triage", action="store_true", default=False, help="Automatically run triage for detected plan or sites")
+    quota_intake.add_argument("--no-record", action="store_false", dest="record", default=True, help="Do not write ingested alerts to ledger")
+
+    quota_ledger = quota_commands.add_parser("ledger")
+    quota_ledger.add_argument("ledger_action", nargs="?", default="list", choices=("list", "show", "history"))
+    quota_ledger.add_argument("--id", type=int, dest="alert_id", help="Alert ID to inspect")
+    quota_ledger.add_argument("--plan", dest="plan_id", help="Filter by plan ID")
+    quota_ledger.add_argument("--status", help="Filter by alert status")
+    quota_ledger.add_argument("--site", help="Filter remediation history by site ID")
+    quota_ledger.add_argument("--limit", type=int, default=20, help="Limit number of records returned")
     return root
 
 
@@ -907,6 +940,23 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
         engine = QuotaTriageEngine()
         report = engine.triage(snapshot, diagnoses)
 
+        # Record to SSOT ledger
+        try:
+            record_triage_snapshot(
+                plan_id=plan_id,
+                overall_severity=report.overall_severity,
+                total_inodes_used=snapshot.inodes_used,
+                total_inodes_limit=snapshot.inodes_limit,
+                total_web_space_gb=snapshot.web_space_used_gb,
+                reclaimable_inodes=sum(a.estimated_inode_savings or 0 for a in report.remediation_actions),
+                immediate_action_needed=report.immediate_action_needed,
+                culprits=[c.to_dict() for c in report.top_culprits],
+                actions=[a.to_dict() for a in report.remediation_actions],
+                raw_report=report.to_dict(),
+            )
+        except Exception:
+            pass
+
         emit(
             receipt(
                 ok=True,
@@ -977,6 +1027,22 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
         if not is_dry_run:
             evidence["recovery_receipt"] = args.recovery_receipt
 
+        # Record remediation to SSOT ledger
+        try:
+            record_remediation(
+                site_id=site.site_id,
+                target_dir=args.target_dir,
+                dry_run=is_dry_run,
+                inodes_reclaimed=res.get("inodes_reclaimed", 0),
+                disk_reclaimed_mb=res.get("disk_reclaimed_mb", 0.0),
+                status="dry_run" if is_dry_run else "completed",
+                recovery_receipt=getattr(args, "recovery_receipt", "") or "",
+                command_executed=res.get("command_executed", ""),
+                output_json=res,
+            )
+        except Exception:
+            pass
+
         emit(
             receipt(
                 ok=True,
@@ -989,6 +1055,176 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
         )
         return 0
 
+    if action == "intake":
+        messages: list[dict[str, Any]] = []
+        if getattr(args, "file", None):
+            with open(args.file, "r") as f:
+                messages = json.load(f)
+            alerts = scan_json_messages(messages)
+        else:
+            alerts = scan_mail_threads(
+                since_days=args.since_days,
+                limit=args.limit,
+                db_path=getattr(args, "mail_db", None),
+            )
+
+        recorded_count = 0
+        if getattr(args, "record", True):
+            for a in alerts:
+                try:
+                    record_quota_alert(a)
+                    recorded_count += 1
+                except Exception:
+                    pass
+
+        matched_plans: dict[str, list[str]] = {}
+        for a in alerts:
+            p_id, matched_sites = match_alert_to_config(a, config)
+            if p_id:
+                matched_plans.setdefault(p_id, [])
+                for s_id in matched_sites:
+                    if s_id not in matched_plans[p_id]:
+                        matched_plans[p_id].append(s_id)
+
+        triage_results: dict[str, Any] = {}
+        if getattr(args, "auto_triage", False) and matched_plans:
+            engine = QuotaTriageEngine()
+            store = QuotaStore()
+            for p_id, s_ids in matched_plans.items():
+                snap = store.load_snapshot(p_id)
+                if not snap:
+                    snap = PlanQuotaSnapshot(
+                        plan_id=p_id,
+                        plan_name=f"Plan {p_id}",
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                diags: list[SiteDeepDiagnosis] = []
+                for s_id in s_ids:
+                    s_cfg = config.sites.get(s_id)
+                    if s_cfg:
+                        try:
+                            diags.append(probe_site_deep(s_cfg))
+                        except Exception:
+                            pass
+                rep = engine.triage(snap, diags)
+                triage_results[p_id] = rep.to_dict()
+                try:
+                    record_triage_snapshot(
+                        plan_id=p_id,
+                        overall_severity=rep.overall_severity,
+                        total_inodes_used=snap.inodes_used,
+                        total_inodes_limit=snap.inodes_limit,
+                        total_web_space_gb=snap.web_space_used_gb,
+                        reclaimable_inodes=sum(act.estimated_inode_savings or 0 for act in rep.remediation_actions),
+                        immediate_action_needed=rep.immediate_action_needed,
+                        culprits=[c.to_dict() for c in rep.top_culprits],
+                        actions=[act.to_dict() for act in rep.remediation_actions],
+                        raw_report=rep.to_dict(),
+                    )
+                except Exception:
+                    pass
+
+        evidence = {
+            "alerts_found": len(alerts),
+            "alerts_recorded": recorded_count,
+            "alerts": [a.to_dict() for a in alerts],
+            "matched_plans": matched_plans,
+            "auto_triage_executed": bool(triage_results),
+            "triage_results": triage_results,
+        }
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-intake",
+                target="mail_threads",
+                mutation_state="applied" if recorded_count > 0 else "not_applicable",
+                request_id=request_id,
+                evidence=evidence,
+            )
+        )
+        return 0
+
+    if action == "ledger":
+        ledger_subaction = getattr(args, "ledger_action", "list") or "list"
+        if ledger_subaction == "show":
+            alert_id = getattr(args, "alert_id", None)
+            if not alert_id:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-ledger",
+                        target=None,
+                        mutation_state="not_applicable",
+                        request_id=request_id,
+                        safe_next_action="Provide --id <alert_id> to inspect a specific alert.",
+                        diagnostics={"code": "missing_alert_id"},
+                    )
+                )
+                return 2
+            alert = get_quota_alert_by_id(alert_id)
+            if not alert:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="quota-ledger",
+                        target=str(alert_id),
+                        mutation_state="not_applicable",
+                        request_id=request_id,
+                        safe_next_action="Verify alert ID using 'siteground-ops quota ledger list'.",
+                        diagnostics={"code": "alert_not_found"},
+                    )
+                )
+                return 1
+            emit(
+                receipt(
+                    ok=True,
+                    operation="quota-ledger",
+                    target=str(alert_id),
+                    mutation_state="not_applicable",
+                    request_id=request_id,
+                    evidence=alert.to_dict(),
+                )
+            )
+            return 0
+
+        if ledger_subaction == "history":
+            site_filter = getattr(args, "site", None)
+            limit = getattr(args, "limit", 20)
+            records = get_remediation_records(site_id=site_filter, limit=limit)
+            emit(
+                receipt(
+                    ok=True,
+                    operation="quota-ledger-history",
+                    target=site_filter or "all_sites",
+                    mutation_state="not_applicable",
+                    request_id=request_id,
+                    evidence={"count": len(records), "records": records},
+                )
+            )
+            return 0
+
+        # Default: list alerts and triage snapshots
+        limit = getattr(args, "limit", 20)
+        status_filter = getattr(args, "status", None)
+        plan_filter = getattr(args, "plan_id", None)
+        alerts = get_quota_alerts(limit=limit, status=status_filter, plan_id=plan_filter)
+        snapshots = get_triage_snapshots(plan_id=plan_filter, limit=5)
+        emit(
+            receipt(
+                ok=True,
+                operation="quota-ledger",
+                target=plan_filter or "all_plans",
+                mutation_state="not_applicable",
+                request_id=request_id,
+                evidence={
+                    "alerts_count": len(alerts),
+                    "alerts": [a.to_dict() for a in alerts],
+                    "recent_triage_snapshots": snapshots,
+                },
+            )
+        )
+        return 0
+
     emit(
         receipt(
             ok=False,
@@ -996,7 +1232,7 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
             target=None,
             mutation_state="not_applicable",
             request_id=request_id,
-            safe_next_action="Specify a valid quota action: check, diagnose, triage, clean, record.",
+            safe_next_action="Specify a valid quota action: check, diagnose, triage, clean, record, intake, ledger.",
             diagnostics={"code": "invalid_quota_action"},
         )
     )
