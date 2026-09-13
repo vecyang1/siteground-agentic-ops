@@ -2,15 +2,25 @@
 
 ## Unreleased
 
-- Add `quota` subcommands (`check`, `diagnose`, `triage`, `record`) with
-  first-principles diagnostic and remediation engine. Supports parsing SiteGround
-  portal telemetry (inodes, web space, program executions peak), in-depth Novamira/SSH
-  site probing (reclaimable `upgrade-temp-backup` inodes, top plugin inodes,
-  `/home/customer/.opcache`, virtual `wp-cron` avalanches and heavy hook analysis,
-  dynamic cache configuration, unauthenticated XML-RPC exposure, and crawler/facet
-  query storm detection from access logs), and holistic multi-site triage synthesis
-  with prioritized remediation actions (`BOT_SCRAPER_DEFENSE`, `INODES_RECLAMATION`,
-  `CRON_STABILIZATION`, `SECURITY_HARDENING`).
+- Add `quota` subcommands (`check`, `diagnose`, `triage`, `clean`, `record`) with
+  first-principles diagnostic and remediation engine:
+  - Multi-channel telemetry parsing SiteGround portal statistics (inodes, web space,
+    hourly executions peak, CPU seconds alert).
+  - In-depth Novamira MCP and SSH site probing (identifying `upgrade-temp-backup` stale
+    inodes, `wp-staging` directories, top plugin consumers, `/home/customer/.opcache`,
+    virtual `wp-cron` avalanches with heavy hook frequency, dynamic cache configuration,
+    unauthenticated XML-RPC exposure, and crawler/facet query storms via access logs).
+  - Holistic multi-site plan triage synthesis: automatically discovers and probes all
+    configured sites sharing a hosting plan, detecting orphaned staging sites
+    (`staging2.*`), cumulative inode consumers, and generating prioritized remediation
+    strategies (`BOT_SCRAPER_DEFENSE`, `INODES_RECLAMATION`, `CRON_STABILIZATION`,
+    `SECURITY_HARDENING`).
+  - Safe closed-loop remediation (`quota clean`): strictly restricted to allowed
+    subdirectories (`upgrade-temp-backup`, `wp-staging`, `cache`), supports `--dry-run`
+    inspection, and fails closed without `--confirm-target` and `--recovery-receipt`.
+    Implements recursive PHP deletion via Novamira MCP and robust `find -delete` over SSH.
+  - Public repository hygiene: enforced strict placeholder hostnames across all test
+    fixtures, protecting public tree from real domain leaks.
 
 - Standardize `siteground-ops` skill documentation with `## Skill Metadata` and
   `## Gotchas`. Add gotcha warning that staging targets (`*.sg-host.com`) are
