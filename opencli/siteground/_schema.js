@@ -40,7 +40,7 @@ export function parseStatisticsText(text) {
   if ([webLimit, webUsed, webFree, inodeLimit, inodeUsed, inodeFree].some((value) => value === null)) {
     return [];
   }
-  return [
+  const rows = [
     { metric: 'web_space_limit', value: webLimit, unit: web[2].toUpperCase() },
     { metric: 'web_space_used', value: webUsed, unit: web[4].toUpperCase() },
     { metric: 'web_space_free', value: webFree, unit: web[6].toUpperCase() },
@@ -50,6 +50,21 @@ export function parseStatisticsText(text) {
     { metric: 'inodes_free', value: inodeFree, unit: 'count' },
     { metric: 'inodes_used_percent', value: percent(inodeUsed, inodeLimit), unit: 'percent' },
   ];
+  const executions = normalized.match(
+    /Program Executions\s+([\d,]+)(?:\s*\/\s*hour)?.*?([\d,]+)\s*(?:Used|peak|\/hr)?/i,
+  );
+  if (executions) {
+    const execLimit = number(executions[1]);
+    const execUsed = number(executions[2]);
+    if (execLimit !== null && execUsed !== null) {
+      rows.push(
+        { metric: 'program_executions_limit', value: execLimit, unit: 'COUNT' },
+        { metric: 'program_executions_used', value: execUsed, unit: 'COUNT' },
+        { metric: 'program_executions_used_percent', value: percent(execUsed, execLimit), unit: 'percent' },
+      );
+    }
+  }
+  return rows;
 }
 
 

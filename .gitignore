@@ -13,3 +13,5 @@ logs/
 id_ed25519*
 node_modules/
 .gitnexus/
+*.png
+*.jpg

@@ -23,12 +23,31 @@ siteground-ops inventory <site-id> [--transport auto|ssh|novamira]
 siteground-ops onboard <site-id> [--transport auto|ssh|novamira]
 siteground-ops cache-status <site-id> [--transport auto|ssh|novamira]
 siteground-ops cache-purge <site-id> [--transport auto|ssh|novamira] --confirm-target <site-id> --recovery-receipt <receipt>
+siteground-ops quota check [--plan <plan-id>]
+siteground-ops quota diagnose <site-id> [--transport auto|ssh|novamira]
+siteground-ops quota triage <site-id|plan-id> [--plan <plan-id>]
+siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-peak <hourly-peak> [--cpu-alert]
 siteground-ops wp-admin <site-id-or-domain> [--app <id>] [--foreground]
 siteground-ops portal read <account> wp-apps
 siteground-ops novamira-update check
 siteground-ops novamira-update baseline --confirm-version 1.1.0
 siteground-ops novamira-update apply --confirm-version 1.1.0
 ```
+
+## Quota monitoring, diagnosis & triage
+
+SiteGround shared hosting plans impose strict plan-level resource caps (e.g. 600,000 Inodes, 4,000 Program Executions/hour, monthly CPU seconds). `siteground-ops quota` provides an end-to-end monitoring, deep diagnosis, and triage engine:
+
+- `quota check [--plan <plan-id>]`: Loads the latest telemetry snapshot for a hosting plan, grading severity (`ok`, `warning`, `critical`) across inodes, web space, and program executions, listing per-site shares.
+- `quota diagnose <site-id> [--transport auto|ssh|novamira]`: Performs an in-depth non-destructive runtime probe of a WordPress site via Novamira MCP or SSH. Detects:
+  - Inode bloat breakdown (`wp-content/upgrade-temp-backup/` stale update files, top plugin consumers like `surecart` or `elementor`, opcode cache files in `/home/customer/.opcache/`).
+  - CPU & execution drivers: Virtual WP-Cron avalanches (`DISABLE_WP_CRON` is false) with top recurring hooks breakdown, unauthenticated `/xmlrpc.php` exposure, and server access log telemetry sampling for aggressive bots hitting faceted query URLs with high cache-miss rates.
+- `quota triage <site-id|plan-id> [--plan <plan-id>]`: Synthesizes plan-level telemetry and in-site deep diagnoses into actionable, prioritized remediation strategies:
+  - `BOT_SCRAPER_DEFENSE`: Block or throttle combinatorial crawler bots in `robots.txt` or Cloudflare/Site Tools WAF.
+  - `INODES_RECLAMATION`: Safe commands to prune abandoned `upgrade-temp-backup` directories and clean stale transients.
+  - `CRON_STABILIZATION`: Transition from synchronous visitor-triggered virtual cron to system crontab (`DISABLE_WP_CRON = true`).
+  - `SECURITY_HARDENING`: Disable unauthenticated XML-RPC endpoint.
+- `quota record --plan <plan-id> ...`: Records manual or OpenCLI-parsed portal telemetry into the local state store (`~/.config/siteground-ops/quota_telemetry/<plan-id>.json`).
 
 ## WordPress admin sign-in
 

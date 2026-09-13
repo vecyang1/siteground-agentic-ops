@@ -33,6 +33,29 @@ test('parseStatisticsText returns numeric web-space and inode rows', () => {
 });
 
 
+test('parseStatisticsText includes program executions when present', () => {
+  const rows = parseStatisticsText(`
+    Web Space 100 GB 86.4% 18.9 GB Used, 81.1 GB Free
+    Inodes 600,000 90.4% 542,722 Used, 57,278 Free
+    Program Executions 4,000 / hour 15,899 peak
+  `);
+
+  assert.deepEqual(rows, [
+    { metric: 'web_space_limit', value: 100, unit: 'GB' },
+    { metric: 'web_space_used', value: 18.9, unit: 'GB' },
+    { metric: 'web_space_free', value: 81.1, unit: 'GB' },
+    { metric: 'web_space_used_percent', value: 18.9, unit: 'percent' },
+    { metric: 'inodes_limit', value: 600000, unit: 'count' },
+    { metric: 'inodes_used', value: 542722, unit: 'count' },
+    { metric: 'inodes_free', value: 57278, unit: 'count' },
+    { metric: 'inodes_used_percent', value: 90.454, unit: 'percent' },
+    { metric: 'program_executions_limit', value: 4000, unit: 'COUNT' },
+    { metric: 'program_executions_used', value: 15899, unit: 'COUNT' },
+    { metric: 'program_executions_used_percent', value: 397.475, unit: 'percent' },
+  ]);
+});
+
+
 test('parsePaymentMethodLabels excludes card endings from normal output', () => {
   const rows = parsePaymentMethodLabels([
     'Payment method Primary card PayPal ending at expires at',

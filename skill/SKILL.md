@@ -5,6 +5,15 @@ description: Use for safe, auditable SiteGround shared-host WordPress operations
 
 # SiteGround Ops
 
+## Skill Metadata
+
+- **Origin:** `local`
+- **Source:** `/Users/vecsatfoxmailcom/Documents/A-coding/A-Sync/26.08.09-siteground-agentic-ops`
+- **Author:** Vec + Antigravity
+- **Created:** 2026-08-09
+- **Updated:** 2026-09-05
+- **Review status:** `reviewed`
+
 Use the local `siteground-ops` CLI as the thin control plane for shared-hosted WordPress. It is designed for both humans and agents: explicit site IDs, JSON receipts, redacted diagnostics, read-first defaults, and refusal on ambiguous targets or unverified writes.
 
 ## First move
@@ -15,6 +24,9 @@ siteground-ops doctor <exact-site-id> [--transport auto|ssh|novamira]
 siteground-ops inventory <exact-site-id> [--transport auto|ssh|novamira]
 siteground-ops cache-status <exact-site-id> [--transport auto|ssh|novamira]
 siteground-ops onboard <exact-site-id> [--transport auto|ssh|novamira]
+siteground-ops quota check [--plan <plan-id>]
+siteground-ops quota diagnose <exact-site-id> [--transport auto|ssh|novamira]
+siteground-ops quota triage <exact-site-id|plan-id> [--plan <plan-id>]
 ```
 
 Use the exact target returned by `sites`. `ready` reports the primary adapter;
@@ -164,6 +176,37 @@ so verify that it points to an existing provider backup or project recovery
 record before running the command. `applied` requires a successful `wp sg purge` (via SSH) or `sg_cachepress_purge_everything()` (via Novamira), matching WordPress `home_url` before and after, and a public GET that returns HTTP 2xx/3xx without changing origin. A dropped connection after send is `unknown`; independently read state before any retry.
 Novamira cache purge is supported explicitly via `--transport novamira`; by default (`--transport auto` or `ssh`), `cache-purge` requires SSH/WP-CLI to ensure fail-closed mutation safety.
 
+## Quota monitoring, diagnosis & triage
+
+SiteGround shared hosting imposes strict plan-level resource caps (e.g. 600,000 Inodes, 4,000 Program Executions/hour, monthly CPU seconds). When alerts trigger, use the unified quota toolchain for telemetry, in-site diagnosis, and triage:
+
+```bash
+# Check plan-wide quota status and site shares
+siteground-ops quota check [--plan <plan-id>]
+
+# In-depth per-site diagnosis via Novamira MCP or SSH
+siteground-ops quota diagnose <exact-site-id> [--transport auto|ssh|novamira]
+
+# Holistic plan-level synthesis and prioritized remediation actions
+siteground-ops quota triage <exact-site-id|plan-id> [--plan <plan-id>]
+
+# Record or update telemetry snapshots manually from portal statistics
+siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-peak <hourly-peak> [--cpu-alert]
+```
+
+### High-signal diagnostic findings & culprits
+
+- **`CRAWLER_SCRAPE_SURGE`**: Aggressive crawler bots (e.g. Amazonbot, PetalBot) querying combinatorial facet URLs (`/shop/?products-sc_collection[...]`), generating high cache miss rates (>60%) and triggering rapid `POST /wp-cron.php` executions.
+  - *Remedy*: Block or rate-limit aggressive bots in `robots.txt` or Site Tools / Cloudflare WAF.
+- **`CRON_VIRTUAL`**: Virtual WP-Cron (`DISABLE_WP_CRON` is false) executing synchronously on every unauthenticated web visit and bot request.
+  - *Remedy*: Set `DISABLE_WP_CRON = true` in `wp-config.php` and offload cron jobs to system crontab or an external scheduler.
+- **`INODES_TEMP_BACKUP`**: Stale, abandoned backup files accumulated in `wp-content/upgrade-temp-backup/` during WordPress core/plugin auto-updates.
+  - *Remedy*: Safely purge via `rm -rf wp-content/upgrade-temp-backup/*`.
+- **`INODES_PLUGINS`**: Breakdown of the top plugin directories consuming file handles (e.g. SureCart, Modular Connector, Elementor).
+- **`XMLRPC_ACTIVE`**: Unauthenticated `/xmlrpc.php` interface open to brute-force bot bursts.
+  - *Remedy*: Add `add_filter('xmlrpc_enabled', '__return_false');`.
+- **`INODES_OPCACHE`**: PHP opcode cache file accumulation in `/home/customer/.opcache/`.
+
 ## Novamira update contract
 
 Novamira CLI 1.0.2+ removed `--access read` and grants full access on login. Do not authorize a profile merely to make an E2E check pass. For the installed local package:
@@ -196,3 +239,20 @@ credential pointers, never values. A Novamira-only profile uses
 Passwords, SSH passphrases, cookies, private endpoints, or raw customer data. If
 a provider capability is not publicly documented, label it unsupported/unknown
 rather than reverse-engineering it into a production dependency.
+
+## Gotchas
+
+- **Staging targets (`*.sg-host.com`) are mutable scratchpads; never cite historical task logs as current site identity.**
+  Staging environments like `vectory43.sg-host.com` and `vectory44.sg-host.com` are temporary scratchpads reused across different client mockups, design prototypes, and experiments over time (e.g. `vectory43` hosted an earlier cat landing page test in July 2026, but is currently Bokksu's `design-md` mock page).
+  - *Choosing the Rung (`skill-creator`)*: *"A current fact written in prose is a future lie."* Past task logs in `task_plan.md` or `progress.md` record what was built at that timestamp, not what is deployed today.
+  - *Evidence and Runtime Proof (`starting-with-readiness`)*: *"Before reporting absence or identity, ask the runtime, not the filesystem; 没人跑的检查不算证据."* To identify what is currently running on a staging target, always probe the live runtime (e.g. `curl -sL https://<target> | grep -io '<title>[^<]*</title>'` or `siteground-ops inventory <target>`) or inspect the target's explicit profile label in `~/.config/siteground-ops/sites.json`.
+- **SiteGround autologin credentials are single-use**: The minted autologin URL 404s after the first visit. If a login attempt reports `unknown`, do not retry blindly; check the browser first.
+- **Ambiguous WordPress Application IDs**: The WordPress application ID on a SiteGround site is not always `1` (e.g. staging copies or multi-app installs), and each app reports the site's primary domain rather than the staging host. Use `--app <id>` when prompted.
+
+## Self-Evolution
+
+**Post-Task Reflection**: Did I learn a new pattern or fix a critical bug?
+- **YES**: Update `## Gotchas`, `references/`, or `incidents/` immediately.
+- **NO**: Do nothing.
+- **Constraint**: Only log high-signal improvements. Ignore noise.
+
