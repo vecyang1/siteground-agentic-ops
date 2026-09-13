@@ -205,6 +205,27 @@ siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-
 - **Fail-Closed Mutation Contract**: Unless `--dry-run` is passed, the CLI refuses execution (exit `2`, `mutation_state: refused`) without `--confirm-target <exact-site-id>` and `--recovery-receipt <receipt>`.
 - **Dual Transport Support**: Uses safe recursive PHP deletion via Novamira MCP for Novamira sites, and atomic `find -delete` with `rm -rf` fallback over SSH for SSH sites. Returns verified count of observed and deleted files.
 
+### Mail Thread Alert Ingestion (`quota intake`)
+
+- **High-Speed Intake Engine**: Connects to local macOS Mail Envelope Index SQLite database (<5ms query time) to detect SiteGround alert emails matching monthly CPU seconds exhaustion, 90%/100% Inode limits, program execution spikes, and performance reports.
+- **Metadata Extraction**: Automatically extracts hosting plan name, base64 plan id (e.g. `TFEvK1ozb1BKUT09`, `TEFud1ozd0pJUT09`), official SiteGround statistics and upgrade URLs, and all affected sibling websites.
+- **SSOT Ledger Recording**: Ingested alerts are saved and deduplicated in the persistent SQLite database (`~/.config/siteground-ops/quota_ledger.db`).
+- **Automated Triage Trigger**: Passing `--auto-triage` immediately runs deep multi-site diagnostics across all sibling sites mapped to the alert's plan.
+  ```bash
+  siteground-ops quota intake --since-days 30 --auto-triage
+  ```
+
+### SSOT Quota Ledger & Audit (`quota ledger`)
+
+- **Persistent Local Database**: `~/.config/siteground-ops/quota_ledger.db` stores ingested alerts, historical multi-site triage snapshots (with exact inode counts, culprits, and action plans), and safe remediation receipts.
+- **Querying Commands**:
+  ```bash
+  siteground-ops quota ledger list [--plan <plan_id>] [--status <status>]
+  siteground-ops quota ledger show --id <alert_id>
+  siteground-ops quota ledger history [--site <site_id>]
+  ```
+- **Automated Cadence**: Monitored daily via Antigravity cadence card `CAD-20260914-siteground-quota-sentinel`.
+
 ### High-signal diagnostic findings & culprits
 
 - **`CRAWLER_SCRAPE_SURGE`**: Aggressive crawler bots (e.g. Amazonbot, PetalBot) querying combinatorial facet URLs (`/shop/?products-sc_collection[...]`), generating high cache miss rates (>60%) and triggering rapid `POST /wp-cron.php` executions.
