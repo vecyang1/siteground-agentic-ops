@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .config import SiteConfig, OpsConfig
 from .receipts import redact
@@ -1121,6 +1122,8 @@ return array(
             "observed_bytes": int(data.get("observed_bytes", 0)),
             "deleted_files": int(data.get("deleted_files", 0)),
             "deleted_dirs": int(data.get("deleted_dirs", 0)),
+            "inodes_reclaimed": int(data.get("deleted_files", 0)) if not dry_run else 0,
+            "disk_reclaimed_mb": round(int(data.get("observed_bytes", 0)) / (1024 * 1024), 2) if not dry_run else 0.0,
             "errors": data.get("errors", []),
             "transport": "novamira",
         }
@@ -1147,12 +1150,14 @@ return array(
             observed_bytes = int(raw_kb) * 1024 if raw_kb.isdigit() else 0
 
             deleted_files = 0
+            command_executed = check_cmd
             if not dry_run and observed_files > 0:
                 del_cmd = (
                     f"cd {site.remote_path} && if [ -d '{rel_path}' ]; then "
                     f"(find '{rel_path}' -mindepth 1 -delete 2>/dev/null || rm -rf '{rel_path}'/*) && "
                     f"find '{rel_path}' -mindepth 1 | wc -l; else echo 0; fi"
                 )
+                command_executed = del_cmd
                 _, stdout, _ = client.exec_command(del_cmd, timeout=45)
                 raw_rem = stdout.read().decode("utf-8", errors="replace").strip()
                 rem = int(raw_rem) if raw_rem.isdigit() else 0
@@ -1168,6 +1173,9 @@ return array(
                 "observed_bytes": observed_bytes,
                 "deleted_files": deleted_files,
                 "deleted_dirs": 0,
+                "inodes_reclaimed": deleted_files if not dry_run else 0,
+                "disk_reclaimed_mb": round(observed_bytes / (1024 * 1024), 2) if not dry_run else 0.0,
+                "command_executed": command_executed,
                 "errors": [],
                 "transport": "ssh",
             }
@@ -1175,6 +1183,96 @@ return array(
             client.close()
 
     raise RunnerError(f"Unsupported adapter {site.adapter!r} for inode cleanup.")
+
+
+def clean_sibling_staging(
+    site: SiteConfig,
+    staging_dir_name: str,
+    *,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Safely purge an obsolete sibling staging directory under ~/www/ via SSH."""
+    if not staging_dir_name or "/" in staging_dir_name or "\\" in staging_dir_name or ".." in staging_dir_name:
+        raise ValueError(
+            f"Invalid staging directory name {staging_dir_name!r}: must not contain slashes or directory traversal."
+        )
+
+    clean_name = staging_dir_name.strip()
+    if "staging" not in clean_name.lower():
+        raise ValueError(
+            f"Directory {clean_name!r} is not recognized as a staging directory (must contain 'staging')."
+        )
+
+    if site.public_url:
+        prod_host = urlsplit(site.public_url).netloc.lower()
+        if prod_host and prod_host == clean_name.lower():
+            raise ValueError(
+                f"Target {clean_name!r} matches the production site domain and cannot be deleted."
+            )
+
+    if site.adapter != "paramiko_wpcli":
+        raise RunnerError(
+            f"Adapter {site.adapter!r} does not support account-level staging directory cleanup (requires SSH)."
+        )
+
+    runner = build_runner(site)
+    client = runner._connect()
+    try:
+        staging_path = f"~/www/{clean_name}"
+
+        # Verify directory exists
+        check_exists = f"if [ -d {staging_path} ]; then echo 1; else echo 0; fi"
+        _, stdout, _ = client.exec_command(check_exists, timeout=15)
+        raw_exists = stdout.read().decode("utf-8", errors="replace").strip()
+        if raw_exists != "1":
+            raise RunnerError(f"Staging directory {staging_path} does not exist on remote host.")
+
+        # Count files/inodes
+        cnt_cmd = f"find {staging_path} -mindepth 1 | wc -l"
+        _, stdout, _ = client.exec_command(cnt_cmd, timeout=45)
+        raw_cnt = stdout.read().decode("utf-8", errors="replace").strip()
+        observed_files = int(raw_cnt) if raw_cnt.isdigit() else 0
+
+        # Count bytes
+        bytes_cmd = f"du -sk {staging_path} 2>/dev/null | cut -f1"
+        _, stdout, _ = client.exec_command(bytes_cmd, timeout=20)
+        raw_kb = stdout.read().decode("utf-8", errors="replace").strip()
+        observed_bytes = int(raw_kb) * 1024 if raw_kb.isdigit() else 0
+
+        deleted_files = 0
+        deleted_dirs = 0
+        command_executed = cnt_cmd
+        if not dry_run:
+            del_cmd = f"rm -rf {staging_path} && if [ ! -d {staging_path} ]; then echo 1; else echo 0; fi"
+            command_executed = f"rm -rf {staging_path}"
+            _, stdout, _ = client.exec_command(del_cmd, timeout=90)
+            raw_del = stdout.read().decode("utf-8", errors="replace").strip()
+            if raw_del != "1":
+                raise RunnerError(f"Failed to completely delete {staging_path}.")
+            deleted_files = observed_files
+            deleted_dirs = 1
+
+        inodes_reclaimed = deleted_files if not dry_run else 0
+        disk_reclaimed_mb = round(observed_bytes / (1024 * 1024), 2) if not dry_run else 0.0
+
+        return {
+            "site_id": site.site_id,
+            "home_url": site.public_url,
+            "target_staging": clean_name,
+            "path": staging_path,
+            "dry_run": dry_run,
+            "observed_files": observed_files,
+            "observed_bytes": observed_bytes,
+            "deleted_files": deleted_files,
+            "deleted_dirs": deleted_dirs,
+            "inodes_reclaimed": inodes_reclaimed,
+            "disk_reclaimed_mb": disk_reclaimed_mb,
+            "command_executed": command_executed,
+            "errors": [],
+            "transport": "ssh",
+        }
+    finally:
+        client.close()
 
 
 @dataclass(frozen=True)

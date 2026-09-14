@@ -1123,3 +1123,98 @@ def test_probe_site_deep_ssh_telemetry_extraction(
     assert "Amazonbot" in diag.crawler_traffic["top_bots"]
 
 
+def test_clean_sibling_staging_validation() -> None:
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.quota import clean_sibling_staging
+
+    site = SiteConfig(
+        site_id="test-ssh",
+        label="Test Site",
+        public_url="https://main.example.com",
+        environment="production",
+        adapter="paramiko_wpcli",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+    )
+
+    with pytest.raises(ValueError, match="must not contain slashes"):
+        clean_sibling_staging(site, "staging/dir", dry_run=True)
+
+    with pytest.raises(ValueError, match="not recognized as a staging directory"):
+        clean_sibling_staging(site, "production-clone.example.com", dry_run=True)
+
+    # Test exact collision with production
+    site_staging = SiteConfig(
+        site_id="test-staging",
+        label="Test Staging",
+        public_url="https://staging.example.com",
+        environment="staging",
+        adapter="paramiko_wpcli",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+    )
+    with pytest.raises(ValueError, match="matches the production site domain"):
+        clean_sibling_staging(site_staging, "staging.example.com", dry_run=True)
+
+
+def test_clean_sibling_staging_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    from siteground_ops.config import SiteConfig
+    from siteground_ops.quota import clean_sibling_staging
+
+    site = SiteConfig(
+        site_id="ssh-staging-clean",
+        label="SSH Staging Clean Site",
+        public_url="https://prod.example.com",
+        environment="production",
+        adapter="paramiko_wpcli",
+        credential_pointer="pointer",
+        recovery_pointer="recovery",
+    )
+
+    class MockChannel:
+        def __init__(self, output: str) -> None:
+            self._data = io.BytesIO(output.encode("utf-8"))
+
+        def read(self) -> bytes:
+            return self._data.read()
+
+    class MockSSHClient:
+        def exec_command(self, cmd: str, timeout: int = 15):
+            out = "0"
+            if "if [ -d" in cmd:
+                out = "1"
+            elif "find" in cmd and "wc -l" in cmd:
+                out = "114820"
+            elif "du -sk" in cmd:
+                out = "3000000"
+            elif "rm -rf" in cmd:
+                out = "1"
+            return None, MockChannel(out), MockChannel("")
+
+        def close(self) -> None:
+            pass
+
+    class MockRunner:
+        def _connect(self):
+            return MockSSHClient()
+
+    monkeypatch.setattr("siteground_ops.quota.build_runner", lambda _s: MockRunner())
+
+    # Dry run
+    dry_res = clean_sibling_staging(site, "staging2.example.com", dry_run=True)
+    assert dry_res["dry_run"] is True
+    assert dry_res["observed_files"] == 114820
+    assert dry_res["deleted_files"] == 0
+    assert dry_res["inodes_reclaimed"] == 0
+
+    # Non-dry run
+    exec_res = clean_sibling_staging(site, "staging2.example.com", dry_run=False)
+    assert exec_res["dry_run"] is False
+    assert exec_res["observed_files"] == 114820
+    assert exec_res["deleted_files"] == 114820
+    assert exec_res["inodes_reclaimed"] == 114820
+    assert exec_res["deleted_dirs"] == 1
+
+
+

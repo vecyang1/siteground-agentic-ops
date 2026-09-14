@@ -36,6 +36,7 @@ from .quota import (
     QuotaTriageEngine,
     SiteDeepDiagnosis,
     SiteQuotaShare,
+    clean_sibling_staging,
     clean_site_inodes,
     domains_match,
     probe_site_deep,
@@ -146,11 +147,15 @@ def parser() -> argparse.ArgumentParser:
 
     quota_clean = quota_commands.add_parser("clean")
     quota_clean.add_argument("target", help="Site identifier to clean inodes on")
-    quota_clean.add_argument(
+    target_clean_group = quota_clean.add_mutually_exclusive_group(required=True)
+    target_clean_group.add_argument(
         "--target-dir",
-        required=True,
         choices=sorted(ALLOWED_CLEANUP_TARGETS),
         help="Subdirectory inside wp-content to purge",
+    )
+    target_clean_group.add_argument(
+        "--target-staging",
+        help="Sibling staging directory name under ~/www/ to delete (e.g. staging2.example.com)",
     )
     quota_clean.add_argument("--dry-run", action="store_true", default=False, help="Inspect without deleting files")
     quota_clean.add_argument("--confirm-target", help="Must match target site id for non-dry-run mutation")
@@ -994,8 +999,12 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
                 )
                 return 2
 
+        target_label = args.target_dir if args.target_dir else f"staging:{args.target_staging}"
         try:
-            res = clean_site_inodes(site, args.target_dir, dry_run=is_dry_run)
+            if args.target_staging:
+                res = clean_sibling_staging(site, args.target_staging, dry_run=is_dry_run)
+            else:
+                res = clean_site_inodes(site, args.target_dir, dry_run=is_dry_run)
         except ValueError as exc:
             emit(
                 receipt(
@@ -1004,7 +1013,10 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
                     target=site.site_id,
                     mutation_state="refused",
                     request_id=request_id,
-                    safe_next_action=f"Select an allowed cleanup target: {sorted(ALLOWED_CLEANUP_TARGETS)}",
+                    safe_next_action=(
+                        f"Select an allowed cleanup target: {sorted(ALLOWED_CLEANUP_TARGETS)} "
+                        f"or specify a valid --target-staging name."
+                    ),
                     diagnostics={"code": "forbidden_cleanup_target", "message": str(exc)},
                 )
             )
@@ -1031,7 +1043,7 @@ def handle_quota(args: argparse.Namespace, config: OpsConfig, request_id: str) -
         try:
             record_remediation(
                 site_id=site.site_id,
-                target_dir=args.target_dir,
+                target_dir=target_label,
                 dry_run=is_dry_run,
                 inodes_reclaimed=res.get("inodes_reclaimed", 0),
                 disk_reclaimed_mb=res.get("disk_reclaimed_mb", 0.0),
