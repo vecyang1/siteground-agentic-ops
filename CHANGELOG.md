@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add `cron` subcommands (`inspect`, `decouple`, `rollback`) for safe Virtual WP-Cron decoupling and execution storm prevention:
+  - Guarded decoupling: injects `define( 'DISABLE_WP_CRON', true );` before WordPress stop markers across both Novamira MCP and SSH/WP-CLI transports.
+  - Fail-closed safety: enforces `--confirm-target <site_id>` and `--recovery-receipt <reason>` for any mutation; supports `--dry-run` inspection.
+  - Atomic backups & auto-rollback: creates timestamped `wp-config.php.bak.<timestamp>` snapshots prior to edit; automatically rolls back if live HTTP readback verification fails.
+  - Dedicated rollback command: `siteground-ops cron rollback <target>` allows instantaneous 1-second restoration to prior snapshots.
+  - Pioneer canary deployed and verified on `vectory44-siteground`: Virtual WP-Cron successfully decoupled with HTTP 200 readback, direct `wp-cron.php` execution endpoint responsive (276ms latency), and remediation recorded in SQLite ledger.
+  - 242 automated unit and integration tests passing green.
+
 - Add `quota intake` and `quota ledger` subcommands with mail thread alert ingestion and SSOT SQLite persistence:
   - High-speed mail intake engine querying macOS Mail.app `Envelope Index` (<5ms) to scan for SiteGround hosting quota alert emails.
   - Multi-pattern alert metadata extraction: parses monthly CPU seconds exhaustion (100% limited / critical), 90%/100% Inode limits, program execution spikes, and performance reports.

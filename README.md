@@ -28,6 +28,9 @@ siteground-ops quota diagnose <site-id> [--transport auto|ssh|novamira]
 siteground-ops quota triage <site-id|plan-id> [--plan <plan-id>]
 siteground-ops quota clean <site-id> --target-dir <dir> [--dry-run]
 siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-peak <hourly-peak> [--cpu-alert]
+siteground-ops cron inspect <site-id>
+siteground-ops cron decouple <site-id> [--dry-run] --confirm-target <site-id> --recovery-receipt <receipt>
+siteground-ops cron rollback <target> [--backup-file <file>] [--dry-run] --confirm-target <target> --recovery-receipt <receipt>
 siteground-ops wp-admin <site-id-or-domain> [--app <id>] [--foreground]
 siteground-ops portal read <account> wp-apps
 siteground-ops novamira-update check
@@ -50,6 +53,14 @@ SiteGround shared hosting plans impose strict plan-level resource caps (e.g. 600
   - `SECURITY_HARDENING`: Disable unauthenticated XML-RPC endpoint.
 - `quota clean <site-id> --target-dir {cache,upgrade-temp-backup,wp-staging} [--dry-run]`: Safe closed-loop remediation for inode bloat. Supports `--dry-run` inspection, strictly confines deletions to safe subdirectories, and fails closed without `--confirm-target` and `--recovery-receipt`. Works across both Novamira MCP and SSH.
 - `quota record --plan <plan-id> ...`: Records manual or OpenCLI-parsed portal telemetry into the local state store (`~/.config/siteground-ops/quota_telemetry/<plan-id>.json`).
+
+## Virtual WP-Cron Decoupling & Stabilization
+
+Virtual WP-Cron runs on visitor requests, causing massive execution storms when bots or high-traffic crawl WordPress sites (e.g. 15,899 executions/hour spiking past limits). `siteground-ops cron` decouples virtual cron safely with preflight checks, atomic snapshots, and 1-second rollbacks:
+
+- `cron inspect <site-id>`: Probes whether `DISABLE_WP_CRON` is already defined, tests background `wp-cron.php` execution responsiveness (`cron_runner_http_status`), measures execution latency, and counts scheduled hooks.
+- `cron decouple <site-id> [--dry-run] --confirm-target <site-id> --recovery-receipt <receipt>`: Injects `define( 'DISABLE_WP_CRON', true );` before WordPress stop markers after validating background runner responsiveness. Creates a timestamped atomic backup `wp-config.php.bak.<timestamp>`. Performs post-mutation readback verification on the live home page; automatically restores backup if non-200.
+- `cron rollback <target> [--backup-file <file>] [--dry-run] --confirm-target <target> --recovery-receipt <receipt>`: Instantly restores `wp-config.php` from the most recent or specified backup snapshot.
 
 ## WordPress admin sign-in
 
