@@ -15,6 +15,11 @@ from .config import ConfigError, OpsConfig, PortalAccountConfig, load_config
 # EX_TEMPFAIL. Distinct from 1 so an automated lane can tell "we could not ask"
 # from "we asked and did not like the answer".
 EXIT_NO_VERDICT = 75
+from .cron_decouple import (
+    decouple_cron,
+    inspect_cron,
+    rollback_cron,
+)
 from .novamira_backend import LocalNovamiraBackend, NovamiraPaths, RegistryUnreachable
 from .novamira_update import NovamiraUpdater, SUPPORTED_CLI_VERSION
 from .portal import (
@@ -189,6 +194,26 @@ def parser() -> argparse.ArgumentParser:
     quota_ledger.add_argument("--status", help="Filter by alert status")
     quota_ledger.add_argument("--site", help="Filter remediation history by site ID")
     quota_ledger.add_argument("--limit", type=int, default=20, help="Limit number of records returned")
+
+    cron = commands.add_parser("cron")
+    cron_commands = cron.add_subparsers(dest="cron_action", required=True)
+
+    cron_inspect = cron_commands.add_parser("inspect")
+    cron_inspect.add_argument("target", help="Site identifier to inspect cron state on")
+
+    cron_decouple = cron_commands.add_parser("decouple")
+    cron_decouple.add_argument("target", help="Site identifier to decouple Virtual WP-Cron on")
+    cron_decouple.add_argument("--dry-run", action="store_true", default=False, help="Inspect without modifying wp-config.php")
+    cron_decouple.add_argument("--confirm-target", help="Must match target site id for non-dry-run mutation")
+    cron_decouple.add_argument("--recovery-receipt", help="Operator rationale/audit receipt required for non-dry-run mutation")
+
+    cron_rollback = cron_commands.add_parser("rollback")
+    cron_rollback.add_argument("target", help="Site identifier to rollback wp-config.php on")
+    cron_rollback.add_argument("--backup-file", help="Specific backup file name to restore from")
+    cron_rollback.add_argument("--dry-run", action="store_true", default=False, help="Inspect rollback target without copying")
+    cron_rollback.add_argument("--confirm-target", help="Must match target site id for non-dry-run mutation")
+    cron_rollback.add_argument("--recovery-receipt", help="Operator rationale/audit receipt required for non-dry-run mutation")
+
     return root
 
 
@@ -1395,6 +1420,176 @@ def handle_onboard(args: argparse.Namespace, config: OpsConfig, request_id: str)
     return 0
 
 
+def handle_cron(args: argparse.Namespace, config: OpsConfig, request_id: str) -> int:
+    action = args.cron_action
+    target = getattr(args, "target", None)
+    site = _site(config, target, f"cron-{action}", request_id)
+    if site is None:
+        return 2
+
+    if action == "inspect":
+        try:
+            res = inspect_cron(site)
+            emit(
+                receipt(
+                    ok=True,
+                    operation="cron-inspect",
+                    target=site.site_id,
+                    mutation_state="not_applicable",
+                    request_id=request_id,
+                    evidence=res,
+                )
+            )
+            return 0
+        except Exception as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="cron-inspect",
+                    target=site.site_id,
+                    mutation_state="not_applicable",
+                    request_id=request_id,
+                    safe_next_action="Inspect site credentials, transport, and wp-config.php status.",
+                    diagnostics={"code": "cron_inspect_failed", "message": str(exc)},
+                )
+            )
+            return 1
+
+    if action == "decouple":
+        is_dry_run = getattr(args, "dry_run", False)
+        if not is_dry_run:
+            if args.confirm_target != site.site_id or not args.recovery_receipt:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="cron-decouple",
+                        target=site.site_id,
+                        mutation_state="refused",
+                        request_id=request_id,
+                        safe_next_action=(
+                            f"Retry with --confirm-target {site.site_id} and --recovery-receipt <receipt>."
+                        ),
+                        diagnostics={"code": "mutation_confirmation_required"},
+                    )
+                )
+                return 2
+
+        try:
+            res = decouple_cron(site, dry_run=is_dry_run)
+        except Exception as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="cron-decouple",
+                    target=site.site_id,
+                    mutation_state="unknown" if not is_dry_run else "not_applicable",
+                    request_id=request_id,
+                    safe_next_action="Read back site HTTP and wp-config.php status before retrying.",
+                    diagnostics={"code": "cron_decouple_failed", "message": str(exc)},
+                )
+            )
+            return 1 if is_dry_run else 3
+
+        evidence = dict(res)
+        if not is_dry_run:
+            evidence["recovery_receipt"] = args.recovery_receipt
+
+        try:
+            record_remediation(
+                site_id=site.site_id,
+                target_dir=f"cron_decouple:{site.site_id}",
+                dry_run=is_dry_run,
+                inodes_reclaimed=0,
+                disk_reclaimed_mb=0.0,
+                status="dry_run" if is_dry_run else "completed",
+                recovery_receipt=getattr(args, "recovery_receipt", "") or "",
+                command_executed="decouple_cron",
+                output_json=res,
+            )
+        except Exception:
+            pass
+
+        emit(
+            receipt(
+                ok=True,
+                operation="cron-decouple",
+                target=site.site_id,
+                mutation_state="applied" if not is_dry_run else "not_applicable",
+                request_id=request_id,
+                evidence=evidence,
+            )
+        )
+        return 0
+
+    if action == "rollback":
+        is_dry_run = getattr(args, "dry_run", False)
+        if not is_dry_run:
+            if args.confirm_target != site.site_id or not args.recovery_receipt:
+                emit(
+                    receipt(
+                        ok=False,
+                        operation="cron-rollback",
+                        target=site.site_id,
+                        mutation_state="refused",
+                        request_id=request_id,
+                        safe_next_action=(
+                            f"Retry with --confirm-target {site.site_id} and --recovery-receipt <receipt>."
+                        ),
+                        diagnostics={"code": "mutation_confirmation_required"},
+                    )
+                )
+                return 2
+
+        try:
+            res = rollback_cron(site, backup_file=getattr(args, "backup_file", None), dry_run=is_dry_run)
+        except Exception as exc:
+            emit(
+                receipt(
+                    ok=False,
+                    operation="cron-rollback",
+                    target=site.site_id,
+                    mutation_state="unknown" if not is_dry_run else "not_applicable",
+                    request_id=request_id,
+                    safe_next_action="Inspect site filesystem and backup files before retrying.",
+                    diagnostics={"code": "cron_rollback_failed", "message": str(exc)},
+                )
+            )
+            return 1 if is_dry_run else 3
+
+        evidence = dict(res)
+        if not is_dry_run:
+            evidence["recovery_receipt"] = args.recovery_receipt
+
+        try:
+            record_remediation(
+                site_id=site.site_id,
+                target_dir=f"cron_rollback:{site.site_id}",
+                dry_run=is_dry_run,
+                inodes_reclaimed=0,
+                disk_reclaimed_mb=0.0,
+                status="dry_run" if is_dry_run else "completed",
+                recovery_receipt=getattr(args, "recovery_receipt", "") or "",
+                command_executed="rollback_cron",
+                output_json=res,
+            )
+        except Exception:
+            pass
+
+        emit(
+            receipt(
+                ok=True,
+                operation="cron-rollback",
+                target=site.site_id,
+                mutation_state="applied" if not is_dry_run else "not_applicable",
+                request_id=request_id,
+                evidence=evidence,
+            )
+        )
+        return 0
+
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     request_id = str(uuid.uuid4())
@@ -1424,6 +1619,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.operation == "quota":
         return handle_quota(args, config, request_id)
+
+    if args.operation == "cron":
+        return handle_cron(args, config, request_id)
 
     if args.operation == "sites":
         summaries = []
