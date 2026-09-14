@@ -239,6 +239,27 @@ siteground-ops quota record --plan <plan-id> --inodes-used <count> --executions-
   - *Remedy*: Add `add_filter('xmlrpc_enabled', '__return_false');`.
 - **`INODES_OPCACHE`**: PHP opcode cache file accumulation in `/home/customer/.opcache/`.
 
+## Virtual WP-Cron Decoupling & Stabilization (`cron`)
+
+Virtual WP-Cron runs on visitor/crawler requests, causing massive execution storms when bots crawl WordPress sites (e.g. 15,899 executions/hour spiking past plan limits). `siteground-ops cron` decouples virtual cron safely with fail-closed preflight checks, atomic snapshots, and 1-second rollbacks:
+
+```bash
+# Inspect cron status, latency, and wp-config state
+siteground-ops cron inspect <site-id>
+
+# Decouple Virtual WP-Cron (dry-run)
+siteground-ops cron decouple <site-id> --dry-run
+
+# Decouple Virtual WP-Cron (fail-closed mutation with snapshot and live HTTP readback)
+siteground-ops cron decouple <site-id> --confirm-target <site-id> --recovery-receipt <receipt>
+
+# Instant 1-second rollback to prior backup snapshot
+siteground-ops cron rollback <site-id> --confirm-target <site-id> --recovery-receipt <receipt>
+```
+
+- **Pioneer Canary Protocol**: Decoupling should be tested on low-risk canary sites first (e.g. `vectory44-siteground`) and observed under daily cadence `CAD-20260914-siteground-quota-sentinel` before rolling out to remaining production sites.
+- **Fail-Closed Mutation Contract**: Mutations require explicit `--confirm-target` matching the site ID and `--recovery-receipt`. An automatic atomic backup `wp-config.php.bak.<timestamp>` is created prior to insertion, and the site's live home page is read back immediately. If non-200, it automatically rolls back.
+
 ## Novamira update contract
 
 Novamira CLI 1.0.2+ removed `--access read` and grants full access on login. Do not authorize a profile merely to make an E2E check pass. For the installed local package:
