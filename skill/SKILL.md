@@ -299,8 +299,24 @@ rather than reverse-engineering it into a production dependency.
   Staging environments like `vectory43.sg-host.com` and `vectory44.sg-host.com` are temporary scratchpads reused across different client mockups, design prototypes, and experiments over time (e.g. `vectory43` hosted an earlier cat landing page test in July 2026, but is currently Bokksu's `design-md` mock page).
   - *Choosing the Rung (`skill-creator`)*: *"A current fact written in prose is a future lie."* Past task logs in `task_plan.md` or `progress.md` record what was built at that timestamp, not what is deployed today.
   - *Evidence and Runtime Proof (`starting-with-readiness`)*: *"Before reporting absence or identity, ask the runtime, not the filesystem; 没人跑的检查不算证据."* To identify what is currently running on a staging target, always probe the live runtime (e.g. `curl -sL https://<target> | grep -io '<title>[^<]*</title>'` or `siteground-ops inventory <target>`) or inspect the target's explicit profile label in `~/.config/siteground-ops/sites.json`.
-- **SiteGround autologin credentials are single-use**: The minted autologin URL 404s after the first visit. If a login attempt reports `unknown`, do not retry blindly; check the browser first.
+- **SiteGround Optimizer autologin credentials are single-use**: The minted autologin URL 404s after the first visit. If a login attempt reports `unknown`, do not retry blindly; check the browser first.
 - **Ambiguous WordPress Application IDs**: The WordPress application ID on a SiteGround site is not always `1` (e.g. staging copies or multi-app installs), and each app reports the site's primary domain rather than the staging host. Use `--app <id>` when prompted.
+- **SiteGround Optimizer (`sg-cachepress`) lazyload bypass requires PHP filter hooks, not HTML data attributes.**
+  Adding `data-no-lazy="1"` or `data-skip-lazy="1"` to an `<iframe>` or `<img>` tag in HTML does not bypass SiteGround's optimizer.
+  - *Choosing the Rung (`skill-creator`)*: *"The failure is silent + the cost repeats + the predicate is decidable."* SG Optimizer's `Abstract_Lazy_Load.php` parses output buffer via regex and does **not** recognize arbitrary HTML data attributes; it unconditionally rewrites `src` to `data-src` and injects the `lazyload` class unless exempted via PHP filters. This causes silent 3–5s+ delays on critical interactive widgets before user interaction or scroll.
+  - *Canonical Remedy (Rung 3)*: Deploy a Must-Use plugin (`mu-plugins/`) or hook in child theme filtering:
+    ```php
+    add_filter('sgo_lazy_load_exclude_iframes', function($exclude) {
+        $exclude[] = 'https://exact-embed-domain.com/path';
+        return $exclude;
+    });
+    add_filter('sgo_lazy_load_exclude_classes', function($exclude) {
+        $exclude[] = 'gm-no-lazy';
+        $exclude[] = 'skip-lazy';
+        return $exclude;
+    });
+    ```
+  - *Evidence and Runtime Proof (`starting-with-readiness`)*: *"没人跑的检查不算证据."* Validate with a live curl/Playwright test verifying that `iframe[src]` contains the real URL and `iframe[data-src]` is strictly absent on the cold page output.
 
 ## Self-Evolution
 
