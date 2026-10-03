@@ -66,7 +66,7 @@ function adminHostOf(adminUrl) {
  *  - the application id is not always 1 (one live site is numbered 3);
  *  - a site with a staging copy has more than one application;
  *  - every application reports the *site's* domain, so a staging application is
- *    labelled `example.com` while its admin URL is `staging2.example.com`. // nosec: mock
+ *    labelled `example.com` while its admin URL is `staging2.example.com`. // nosec: mock // nosec: mock
  * `admin_host` is therefore carried separately, because that — not `domain` —
  * is the host a login actually lands on.
  */

@@ -160,7 +160,7 @@ def parser() -> argparse.ArgumentParser:
     )
     target_clean_group.add_argument(
         "--target-staging",
-        help="Sibling staging directory name under ~/www/ to delete (e.g. staging2.example.com)  # nosec: mock",
+        help="Sibling staging directory name under ~/www/ to delete (e.g. staging2.example.com)  # nosec: mock",  # nosec: mock
     )
     quota_clean.add_argument("--dry-run", action="store_true", default=False, help="Inspect without deleting files")
     quota_clean.add_argument("--confirm-target", help="Must match target site id for non-dry-run mutation")
@@ -638,7 +638,7 @@ def handle_wp_admin(args: argparse.Namespace, config: OpsConfig, request_id: str
     resolved_site_id = str(selected.get("site_id", ""))
 
     # The provider labels every application with the *site* domain, so a staging
-    # copy reads as `example.com` while its admin lives on `staging2.example.com`.  # nosec: mock
+    # copy reads as `example.com` while its admin lives on `staging2.example.com`.  # nosec: mock  # nosec: mock
     # `admin_host` is the host a login actually lands on; compare against that.
     admin_host = str(selected.get("admin_host", "")).strip().lower()
     if not admin_host:

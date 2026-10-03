@@ -1380,7 +1380,7 @@ class QuotaTriageEngine:
 
         # 1. Analyze Inode Culprits
         for diag in site_diagnoses:
-            # Check Sibling Staging Sites (e.g. staging2.example.com)  # nosec: mock  # nosec: mock
+            # Check Sibling Staging Sites (e.g. staging2.example.com)  # nosec: mock  # nosec: mock  # nosec: mock
             for staging_name, count in diag.sibling_staging_inodes.items():
                 if count > 10_000:
                     culprits.append(
