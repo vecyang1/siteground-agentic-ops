@@ -9,7 +9,7 @@ description: Use for safe, auditable SiteGround shared-host WordPress operations
 
 - **Origin:** `local`
 - **Source:** `local`
-- **Author:** Vec + Antigravity
+- **Author:** V
 - **Created:** 2026-08-09
 - **Updated:** 2026-09-05
 - **Review status:** `reviewed`
@@ -307,7 +307,7 @@ rather than reverse-engineering it into a production dependency.
   - *Canonical Remedy (Rung 3)*: Deploy a Must-Use plugin (`mu-plugins/`) or hook in child theme filtering:
     ```php
     add_filter('sgo_lazy_load_exclude_iframes', function($exclude) {
-        $exclude[] = 'https://exact-embed-domain.com/path';
+        $exclude[] = 'https://example-shop.com/path';
         return $exclude;
     });
     add_filter('sgo_lazy_load_exclude_classes', function($exclude) {

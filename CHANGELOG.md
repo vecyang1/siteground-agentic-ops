@@ -16,7 +16,7 @@
   - Robust body parsing: extracts hosting plan name, base64 plan id (e.g. `TFEvK1ozb1BKUT09`), official SiteGround statistics and upgrade URLs, and affected sibling websites, handling clean HTML extraction when plain text parts are empty and stripping style/script blocks.
   - Persistent SQLite SSOT ledger (`~/.config/siteground-ops/quota_ledger.db`): stores `quota_alerts`, `triage_snapshots`, and `remediation_records` with conflict deduplication and querying CLI (`siteground-ops quota ledger {list,show,history}`).
   - Automated triage trigger: `--auto-triage` automatically initiates deep multi-site diagnostics across sibling sites matching the detected plan upon alert intake.
-  - Registered verified daily Antigravity cadence card `CAD-20260914-siteground-quota-sentinel` in `26.06.06 Project Vault` (72/72 cards passing `--strict`).
+  - Registered verified daily cadence card `CAD-20260914-siteground-quota-sentinel` (72/72 cards passing `--strict`).
   - 237 automated unit and contract tests passing 100% green with 0 public hygiene leaks.
 
 - Add `quota` subcommands (`check`, `diagnose`, `triage`, `clean`, `record`) with
@@ -211,6 +211,16 @@
   every hostname must be in an allowlist -- rather than listing the real domains
   it defends against, which would republish them and would only catch today's
   list. It found one real domain that a name-by-name scan had missed.
+
+## [2026-09-22] - 2026-09-22
+
+### Documentation
+- Add sg-cachepress lazyload bypass gotcha citing Choosing the Rung (`edaed41`)
+
+## [2026-09-14] - 2026-09-14
+
+### Documentation
+- Add virtual wp-cron decoupling and stabilization runbook (`9b0fd33`)
 
 ## 0.2.0 - 2026-08-09
 

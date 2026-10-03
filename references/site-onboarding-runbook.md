@@ -88,7 +88,7 @@ Expected evidence includes:
 #### Option A: Novamira MCP Transport (Default for Agentic Ops)
 1. In WordPress Admin (`siteground-ops wp-admin <site-id>`), ensure `novamira` and `novamira-pro` plugins are active.
 2. In WordPress Admin -> Users -> Profile, create an **Application Password** named `novamira-agent`.
-3. Register the server in `mcp_config.json`:
+3. Register the server in your MCP configuration:
    ```json
    "novamira-<slug>": {
      "command": "node",
