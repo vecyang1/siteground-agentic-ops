@@ -62,7 +62,7 @@ PORTAL_PLUGIN_SOURCE_SHA256 = {
     "_runtime.js": "81f5f4954c2e7797d23215cc981c736f6befc261eead64398283b1826b10c78d",
     "_schema.js": "5eaf81916cf9c0e39008959c99eb37c056f735de1b96fc46ac59f06db05f3938",
     "_ui.js": "f92f4a8e23a846127ae5981ac67af1e8af13121712ab9c76f11db21391f7907e",
-    "_wp.js": "113cc0fc5bf89fbac30ada9b0a1abe23b06ae1ef236318b23585a22b10a84ec6",
+    "_wp.js": "d277b873daa5d6f3f503ec91935379a3bb479814e2f21a62cc6f61382d4563bb",
     "billing-methods.js": "ab9f4be6ac4106723c908f960ff4c7d17234f403701c86ff16735f0e6ce10f5f",
     "hosting.js": "38dda6d0171f53653cddd5b2f5490bfd55ab60bcc6fa69a71980fd6781c5d737",
     "payment-history.js": "db2820c1f16e0f9bafc4fd335d4c9b46dca06d452020e9015b8519e3ef0e0782",
